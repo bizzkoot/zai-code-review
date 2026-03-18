@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: version
+        run: |
+          VERSION=$(cat package.json | grep '"version"' | sed 's/.*"version": "\(.*\)".*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog section for version
+        id: changelog
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          
+          # Find the section for this version in CHANGELOG.md
+          # Look for "## [VERSION]" and extract content until next "## [" or end
+          SECTION=$(awk -v ver="$VERSION" '
+            /^\#\# \[/ {
+              gsub(/[\[\]]/, "", $2)
+              if ($2 == ver) {
+                found=1
+                next
+              } else if (found) {
+                exit
+              }
+            }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md)
+          
+          if [ -z "$SECTION" ]; then
+            # No CHANGELOG section, fallback to git commits
+            LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -n "$LAST_TAG" ]; then
+              SECTION=$(git log "$LAST_TAG..HEAD" --pretty='- %s' 2>/dev/null || echo "")
+            else
+              SECTION="Release $VERSION"
+            fi
+          fi
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$SECTION" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          if git revparse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Tag and Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body: ${{ steps.changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update CHANGELOG.md with release link
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          
+          # Check if link already exists
+          LINK="[$VERSION]: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
+          if ! grep -q "\[$VERSION\]:" CHANGELOG.md; then
+            echo "" >> CHANGELOG.md
+            echo "$LINK" >> CHANGELOG.md
+            
+            git config --local user.email "github-actions[bot]@users.noreply.github.com"
+            git config --local user.name "github-actions[bot]"
+            git add CHANGELOG.md
+            git commit -m "docs: add release link for v$VERSION"
+            git push
+          else
+            echo "Release link already exists in CHANGELOG.md"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
