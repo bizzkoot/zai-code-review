@@ -260,7 +260,9 @@ async function run() {
   }
 }
 
-run().catch(err => core.setFailed(err.message));
+if (require.main === module) {
+  run().catch(err => core.setFailed(err.message));
+}
 
 module.exports = {
   splitIntoChunks,
