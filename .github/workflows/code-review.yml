@@ -1,5 +1,9 @@
 name: AI Code Review with Z.ai
 
+# NOTE: This workflow is for testing this action on itself.
+# For use in other repositories, replace 'bizzkoot/zai-code-review@v0.0.1'
+# with your fork or the published action version.
+
 on:
   pull_request:
     types: [opened, synchronize]

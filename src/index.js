@@ -6,6 +6,13 @@ const ZAI_API_URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
 const COMMENT_MARKER = '<!-- zai-code-review -->';
 const MAX_RESPONSE_SIZE = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 300_000;
+
+/**
+ * Maximum chunk size in characters.
+ * Chosen to stay within Z.ai API token limits while accommodating
+ * base64-encoded diffs and system prompt overhead.
+ * Approx 12K tokens per chunk (assuming 4 chars/token).
+ */
 const MAX_CHUNK_SIZE = 50000;
 
 async function getChangedFiles(octokit, owner, repo, pullNumber) {
@@ -26,22 +33,18 @@ async function getChangedFiles(octokit, owner, repo, pullNumber) {
   return files;
 }
 
-function buildPrompt(files) {
-  const diffs = files
-    .filter(f => f.patch)
-    .map(f => `### ${f.filename} (${f.status})\n\`\`\`diff\n${f.patch}\n\`\`\``)
-    .join('\n\n');
-
-  return `Please review the following pull request changes and provide concise, constructive feedback. Focus on bugs, logic errors, security issues, and meaningful improvements. Skip trivial style comments.\n\n${diffs}`;
-}
-
 function splitIntoChunks(files) {
+  const filesWithPatches = files.filter(f => f.patch);
+  
+  if (filesWithPatches.length === 0) {
+    return [];
+  }
+
   const chunks = [];
   let currentChunk = [];
   let currentSize = 0;
 
-  for (const file of files) {
-    if (!file.patch) continue;
+  for (const file of filesWithPatches) {
 
     const fileSize = file.patch.length;
 
@@ -121,17 +124,17 @@ function callZaiApi(apiKey, model, systemPrompt, prompt) {
           try {
             parsed = JSON.parse(data);
           } catch {
-            reject(new Error('Z.ai API returned invalid JSON.'));
+            reject(new Error('Z.ai API: Invalid JSON response'));
             return;
           }
           const content = parsed.choices?.[0]?.message?.content;
           if (!content) {
-            reject(new Error('Z.ai API returned an empty response.'));
+            reject(new Error('Z.ai API: Empty response body'));
           } else {
             resolve(content);
           }
         } else {
-          reject(new Error(`Z.ai API error ${res.statusCode}: ${data.slice(0, 200)}`));
+          reject(new Error(`Z.ai API: HTTP ${res.statusCode} - ${data.slice(0, 200)}`));
         }
       });
     });
@@ -177,21 +180,33 @@ async function run() {
   core.info(`Processing ${files.length} file(s) in ${chunks.length} chunk(s)...`);
 
   const reviews = [];
+  const failedChunks = [];
+
   for (let i = 0; i < chunks.length; i++) {
-    core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
-    const prompt = buildChunkPrompt(chunks[i], i, chunks.length);
-    const review = await callZaiApi(apiKey, model, systemPrompt, prompt);
-    reviews.push(review);
+    try {
+      core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
+      const prompt = buildChunkPrompt(chunks[i], i, chunks.length);
+      const review = await callZaiApi(apiKey, model, systemPrompt, prompt);
+      reviews.push({ index: i, review, success: true });
+    } catch (err) {
+      core.warning(`Chunk ${i + 1}/${chunks.length} failed: ${err.message}`);
+      failedChunks.push({ index: i, error: err.message });
+      reviews.push({ index: i, review: `**Error reviewing this chunk:** ${err.message}`, success: false });
+    }
+  }
+
+  if (failedChunks.length > 0) {
+    core.warning(`${failedChunks.length} chunk(s) failed out of ${chunks.length}`);
   }
 
   let combinedReview;
   if (chunks.length > 1) {
     combinedReview = reviews
-      .map((review, index) => `### Chunk ${index + 1}/${chunks.length}\n\n${review}`)
+      .map(r => `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.review}`)
       .join('\n\n---\n\n');
     core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
   } else {
-    combinedReview = reviews[0];
+    combinedReview = reviews[0].review;
   }
 
   const body = `## ${reviewerName}\n\n${combinedReview}\n\n${COMMENT_MARKER}`;

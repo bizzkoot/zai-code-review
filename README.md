@@ -107,6 +107,12 @@ Instead of using default values for `ZAI_MODEL`, `ZAI_SYSTEM_PROMPT`, and `ZAI_R
 
 Contributions are welcome. See the [CONTRIBUTING](CONTRIBUTING.md) file for more information.
 
+**For AI assistants**: See [AGENTS.md](AGENTS.md) for project structure, coding conventions, and build commands.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a list of version changes and new features.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.
