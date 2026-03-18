@@ -21,7 +21,7 @@ The action runs from `dist/index.js`, which is a self-contained bundle built fro
 **Prerequisites:** Node.js 20+
 
 ```bash
-git clone https://github.com/tarmojussila/zai-code-review.git
+git clone https://github.com/bizzkoot/zai-code-review.git
 cd zai-code-review
 npm install
 ```
@@ -47,7 +47,7 @@ Please keep PRs focused — one fix or feature per PR.
 
 ## Releases
 
-Releases are tagged using semantic versioning (e.g. `v0.1.1`). After a PR is merged to `main`, a maintainer will tag the release.
+Releases are tagged using semantic versioning (e.g. `v0.0.1`). After a PR is merged to `main`, a maintainer will tag the release.
 
 Users reference the action by tag in their workflows, so the `dist/index.js` and `action.yml` at the tagged commit are what gets executed.
 
