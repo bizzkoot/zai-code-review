@@ -39,7 +39,13 @@ jobs:
         uses: bizzkoot/zai-code-review@v0.0.1
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          # Optional - uncomment and set in repo variables if needed
+          # ZAI_MODEL: ${{ vars.ZAI_MODEL }}
+          # ZAI_SYSTEM_PROMPT: ${{ vars.ZAI_SYSTEM_PROMPT }}
+          # ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME }}
 ```
+
+**Note:** All inputs except `ZAI_API_KEY` are optional. If not set, the defaults below are used automatically.
 
 ## Inputs
 
@@ -47,8 +53,11 @@ jobs:
 |---|---|---|---|
 | `ZAI_API_KEY` | Yes | — | Your Z.ai API key |
 | `ZAI_MODEL` | No | `glm-4.7` | Z.ai model to use for review |
-| `ZAI_SYSTEM_PROMPT` | No | See below | Custom system prompt for the AI reviewer |
+| `ZAI_SYSTEM_PROMPT` | No | `You are an expert code reviewer...` | Custom system prompt for the AI reviewer |
 | `ZAI_REVIEWER_NAME` | No | `Z.ai Code Review` | Name shown in the review comment header |
+| `GITHUB_TOKEN` | No | `${{ github.token }}` | GitHub token for API access |
+
+### Z.ai System Prompt
 
 The default system prompt is:
 
@@ -74,34 +83,6 @@ Generate an API key from your Z.ai dashboard.
 4. Click **New repository secret** and add:
 
    - **Name:** `ZAI_API_KEY` — **Value:** your Z.ai API key
-
-## Advanced configuration
-
-Instead of using default values for `ZAI_MODEL`, `ZAI_SYSTEM_PROMPT`, and `ZAI_REVIEWER_NAME`, you can override them, and manage them as GitHub Actions variables. This lets you update the model, review prompt, or reviewer name without touching the workflow file.
-
-### 1️⃣ Add the variables to your repository
-
-1. Go to your GitHub repository
-2. Click **Settings**
-3. Navigate to **Secrets and variables → Actions**
-4. Click the **Variables** tab
-5. Click **New repository variable** and add:
-
-   - **Name:** `ZAI_MODEL` — **Value:** e.g. `glm-4.7`
-   - **Name:** `ZAI_SYSTEM_PROMPT` — **Value:** your custom system prompt
-   - **Name:** `ZAI_REVIEWER_NAME` — **Value:** e.g. `AI Code Review`
-
-### 2️⃣ Reference them in your workflow
-
-```yaml
-      - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.1
-        with:
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          ZAI_MODEL: ${{ vars.ZAI_MODEL }}
-          ZAI_SYSTEM_PROMPT: ${{ vars.ZAI_SYSTEM_PROMPT }}
-          ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME }}
-```
 
 ## Contributing
 
