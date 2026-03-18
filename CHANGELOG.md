@@ -13,13 +13,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `splitIntoChunks()` function to divide files by diff size
   - `buildChunkPrompt()` for chunk-aware prompts with progress tracking
   - Partial chunk error handling with graceful degradation
+- Retry logic with exponential backoff (`callZaiApiWithRetry()`)
+  - Configurable via `RETRY_CONFIG` constant (3 retries, 1-8s delays)
+- Comprehensive test suite with Jest (8 tests covering core functionality)
+- ESLint configuration for code style enforcement
+- CI workflow (`.github/workflows/ci.yml`) for automated lint, test, and build
+- `AGENTS.md` for AI coding assistants and project contributors
+  - `MAX_CHUNK_SIZE` constant (50K characters per chunk)
+  - `splitIntoChunks()` function to divide files by diff size
+  - `buildChunkPrompt()` for chunk-aware prompts with progress tracking
+  - Partial chunk error handling with graceful degradation
 - `AGENTS.md` for AI coding assistants and project contributors
 - Comprehensive error logging for multi-chunk processing
+- Retry logic with exponential backoff for transient failure handling
+- Comprehensive test suite with Jest (8 tests covering core functionality)
+- ESLint configuration for code style enforcement
+- CI workflow (`.github/workflows/ci.yml`) for automated lint, test, and build
+- `AGENTS.md` for AI coding assistants and project contributors
 
 ### Changed
+- **CRITICAL**: Error messages no longer expose API response data (security hardening)
+- Standardized all error messages with `ERR_PREFIX` constant
+- Extracted magic numbers as named constants (`PER_PAGE`, `MAX_CHUNK_SIZE`)
+- Pinned `@vercel/ncc` to exact version `0.38.1`
+- Removed hardcoded model validation - users can use any Z.ai model via `ZAI_MODEL` input
 - Version reset from 0.3.0 to 0.0.1 (fork initialization from tarmojussila/zai-code-review)
 - Repository rebranded to bizzkoot/zai-code-review
-- Enhanced error messages with standardized "Z.ai API:" prefix
+- Enhanced error messages with standardized prefix
 - Improved defensive programming with empty chunk validation
 
 ### Fixed
@@ -29,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Now provides partial results with error messages for failed chunks
 
 ### Security
+- **CRITICAL**: Error messages no longer expose API response data (prevents information disclosure)
+- Retry logic for transient failure handling
 - Maintained secure secret handling with `core.setSecret()`
 - Response size limits enforced (1MB cap)
 - Request timeout protection (300 seconds)

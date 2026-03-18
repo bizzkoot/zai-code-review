@@ -17,10 +17,12 @@ npm install
 Install dependencies. Requires Node.js 20+.
 
 ### Testing
-No automated test suite is currently configured. When adding tests, use a framework compatible with Node.js and GitHub Actions (e.g., Jest or Mocha).
-
-**Running a single test:**
-Not applicable — no test framework is set up yet. If you add tests, document the command here (e.g., `npm test -- --testNamePattern="myTest"`).
+```bash
+npm test                  # Run all tests
+npm run test:watch       # Run tests in watch mode
+npm run lint             # Run ESLint
+npm run ci               # Run lint, tests, and build
+```
 
 ## Code Style Guidelines
 
@@ -101,10 +103,12 @@ req.setTimeout(REQUEST_TIMEOUT_MS, () => {
 - Use `core.setFailed()` for action-level errors in the GitHub Actions context
 
 ```javascript
-reject(new Error('Z.ai API returned invalid JSON.'));
-reject(new Error(`Z.ai API error ${res.statusCode}: ${data.slice(0, 200)}`));
+reject(new Error(`${ERR_PREFIX}Invalid JSON response.`));
+reject(new Error(`${ERR_PREFIX}HTTP ${res.statusCode}.`));
 core.setFailed('This action only runs on pull_request events.');
 ```
+
+**Important:** Never include API response data in error messages to prevent sensitive information leakage.
 
 ### Secrets & Security
 - **Immediately** mark secrets with `core.setSecret()` to prevent them from appearing in logs
@@ -166,9 +170,11 @@ When working with external APIs:
 - Set timeouts to prevent hanging requests
 - Implement response size limits to prevent memory issues
 - Handle JSON parsing errors gracefully
-- Include descriptive error messages with status codes and truncated response bodies
+- Never include API response data in error messages
+- Validate input parameters before sending requests
+- Implement retry logic with exponential backoff for transient failures
 
-See `callZaiApi()` in `src/index.js` for a reference implementation.
+See `callZaiApiWithRetry()` in `src/index.js` for a reference implementation.
 
 ## Pagination
 

@@ -4,16 +4,16 @@ const https = require('https');
 
 const ZAI_API_URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
 const COMMENT_MARKER = '<!-- zai-code-review -->';
+const ERR_PREFIX = 'Z.ai API: ';
 const MAX_RESPONSE_SIZE = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 300_000;
-
-/**
- * Maximum chunk size in characters.
- * Chosen to stay within Z.ai API token limits while accommodating
- * base64-encoded diffs and system prompt overhead.
- * Approx 12K tokens per chunk (assuming 4 chars/token).
- */
+const PER_PAGE = 100;
 const MAX_CHUNK_SIZE = 50000;
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 8000,
+};
 
 async function getChangedFiles(octokit, owner, repo, pullNumber) {
   const files = [];
@@ -23,11 +23,11 @@ async function getChangedFiles(octokit, owner, repo, pullNumber) {
       owner,
       repo,
       pull_number: pullNumber,
-      per_page: 100,
+      per_page: PER_PAGE,
       page,
     });
     files.push(...data);
-    if (data.length < 100) break;
+    if (data.length < PER_PAGE) break;
     page++;
   }
   return files;
@@ -35,7 +35,7 @@ async function getChangedFiles(octokit, owner, repo, pullNumber) {
 
 function splitIntoChunks(files) {
   const filesWithPatches = files.filter(f => f.patch);
-  
+
   if (filesWithPatches.length === 0) {
     return [];
   }
@@ -45,7 +45,6 @@ function splitIntoChunks(files) {
   let currentSize = 0;
 
   for (const file of filesWithPatches) {
-
     const fileSize = file.patch.length;
 
     if (currentSize + fileSize > MAX_CHUNK_SIZE && currentChunk.length > 0) {
@@ -71,7 +70,7 @@ function buildChunkPrompt(files, chunkIndex, totalChunks) {
     .map(f => `### ${f.filename} (${f.status})\n\`\`\`diff\n${f.patch}\n\`\`\``)
     .join('\n\n');
 
-  let prompt = `Please review the following pull request changes and provide concise, constructive feedback. Focus on bugs, logic errors, security issues, and meaningful improvements. Skip trivial style comments.\n\n`;
+  let prompt = 'Please review the following pull request changes and provide concise, constructive feedback. Focus on bugs, logic errors, security issues, and meaningful improvements. Skip trivial style comments.\n\n';
 
   if (totalChunks > 1) {
     prompt += `[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus on the changes in this section only.]\n\n`;
@@ -115,7 +114,7 @@ function callZaiApi(apiKey, model, systemPrompt, prompt) {
       res.on('data', chunk => {
         data += chunk;
         if (data.length > MAX_RESPONSE_SIZE) {
-          req.destroy(new Error('Z.ai API response exceeded size limit.'));
+          req.destroy(new Error(`${ERR_PREFIX}Response exceeded size limit.`));
         }
       });
       res.on('end', () => {
@@ -124,34 +123,58 @@ function callZaiApi(apiKey, model, systemPrompt, prompt) {
           try {
             parsed = JSON.parse(data);
           } catch {
-            reject(new Error('Z.ai API: Invalid JSON response'));
+            reject(new Error(`${ERR_PREFIX}Invalid JSON response.`));
             return;
           }
           const content = parsed.choices?.[0]?.message?.content;
           if (!content) {
-            reject(new Error('Z.ai API: Empty response body'));
+            reject(new Error(`${ERR_PREFIX}Empty response body.`));
           } else {
             resolve(content);
           }
         } else {
-          reject(new Error(`Z.ai API: HTTP ${res.statusCode} - ${data.slice(0, 200)}`));
+          reject(new Error(`${ERR_PREFIX}HTTP ${res.statusCode}.`));
         }
       });
     });
 
     req.on('error', reject);
     req.setTimeout(REQUEST_TIMEOUT_MS, () => {
-      req.destroy(new Error('Z.ai API request timed out.'));
+      req.destroy(new Error(`${ERR_PREFIX}Request timed out.`));
     });
     req.write(body);
     req.end();
   });
 }
 
+async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt) {
+  let lastError;
+
+  for (let attempt = 0; attempt < RETRY_CONFIG.maxRetries; attempt++) {
+    try {
+      return await callZaiApi(apiKey, model, systemPrompt, prompt);
+    } catch (err) {
+      lastError = err;
+      core.info(`API call failed (attempt ${attempt + 1}/${RETRY_CONFIG.maxRetries}): ${err.message}`);
+
+      if (attempt < RETRY_CONFIG.maxRetries - 1) {
+        const delayMs = Math.min(
+          RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt),
+          RETRY_CONFIG.maxDelayMs
+        );
+        core.info(`Retrying in ${delayMs}ms...`);
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function run() {
   const apiKey = core.getInput('ZAI_API_KEY', { required: true });
   core.setSecret(apiKey);
-  const model = core.getInput('ZAI_MODEL');
+  const model = core.getInput('ZAI_MODEL') || 'glm-4.7';
   const systemPrompt = core.getInput('ZAI_SYSTEM_PROMPT');
   const reviewerName = core.getInput('ZAI_REVIEWER_NAME');
   const token = core.getInput('GITHUB_TOKEN');
@@ -186,7 +209,7 @@ async function run() {
     try {
       core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
       const prompt = buildChunkPrompt(chunks[i], i, chunks.length);
-      const review = await callZaiApi(apiKey, model, systemPrompt, prompt);
+      const review = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
       reviews.push({ index: i, review, success: true });
     } catch (err) {
       core.warning(`Chunk ${i + 1}/${chunks.length} failed: ${err.message}`);
@@ -238,3 +261,11 @@ async function run() {
 }
 
 run().catch(err => core.setFailed(err.message));
+
+module.exports = {
+  splitIntoChunks,
+  buildChunkPrompt,
+  callZaiApi,
+  callZaiApiWithRetry,
+  RETRY_CONFIG,
+};
