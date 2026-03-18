@@ -2,6 +2,11 @@ const core = require('@actions/core');
 const github = require('@actions/github');
 const https = require('https');
 
+const ConversationalFeedback = require('./review/ConversationalFeedback');
+const InlineSuggestion = require('./review/InlineSuggestion');
+const FeedbackLearning = require('./review/FeedbackLearning');
+const SecurityCheck = require('./review/SecurityCheck');
+
 const ZAI_API_URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
 const COMMENT_MARKER = '<!-- zai-code-review -->';
 const ERR_PREFIX = 'Z.ai API: ';
@@ -36,9 +41,7 @@ async function getChangedFiles(octokit, owner, repo, pullNumber) {
 function splitIntoChunks(files) {
   const filesWithPatches = files.filter(f => f.patch);
 
-  if (filesWithPatches.length === 0) {
-    return [];
-  }
+  if (filesWithPatches.length === 0) return [];
 
   const chunks = [];
   let currentChunk = [];
@@ -79,6 +82,49 @@ function buildChunkPrompt(files, chunkIndex, totalChunks) {
   prompt += diffs;
 
   return prompt;
+}
+
+function extractActionableSuggestions(reviews) {
+  const suggestions = [];
+  const seen = new Set();
+
+  for (const review of reviews) {
+    const content = review.rawReview || '';
+    const matches = Array.from(content.matchAll(/\[\[suggestion:(.+?)\]\]/gs));
+
+    for (const match of matches) {
+      const parts = match[1].split(':');
+      if (parts.length < 6 || parts[0] !== 'path' || parts[2] !== 'line') {
+        continue;
+      }
+
+      const line = Number(parts[3]);
+      const body = parts[4]?.trim();
+      const suggestion = parts.slice(5).join(':').trim();
+      const path = parts[1]?.trim();
+
+      if (!path || !Number.isInteger(line) || line < 1 || !body || !suggestion) {
+        continue;
+      }
+
+      const id = `${path}:${line}:${body}`;
+      if (seen.has(id)) {
+        continue;
+      }
+
+      seen.add(id);
+      suggestions.push({
+        id,
+        path,
+        line,
+        side: 'RIGHT',
+        body,
+        suggestion,
+      });
+    }
+  }
+
+  return suggestions;
 }
 
 function callZaiApi(apiKey, model, systemPrompt, prompt) {
@@ -122,7 +168,7 @@ function callZaiApi(apiKey, model, systemPrompt, prompt) {
           let parsed;
           try {
             parsed = JSON.parse(data);
-          } catch {
+          } catch (err) {
             reject(new Error(`${ERR_PREFIX}Invalid JSON response.`));
             return;
           }
@@ -191,12 +237,25 @@ async function run() {
 
   const octokit = github.getOctokit(token);
 
+  // FeedbackLearning repoId: owner/repo
+  const repoId = `${owner}/${repo}`;
+
   core.info(`Fetching changed files for PR #${pullNumber}...`);
+
   const files = await getChangedFiles(octokit, owner, repo, pullNumber);
 
   if (!files.some(f => f.patch)) {
     core.info('No patchable changes found. Skipping review.');
     return;
+  }
+
+  // --- SecurityCheck integration ---
+  const securityFindings = SecurityCheck.checkSecurity(files);
+  if (securityFindings.length > 0) {
+    core.warning(`Security findings detected: ${securityFindings.length}`);
+    for (const finding of securityFindings) {
+      core.warning(`[${finding.severity}] ${finding.path}:${finding.line} - ${finding.message}`);
+    }
   }
 
   const chunks = splitIntoChunks(files);
@@ -208,13 +267,22 @@ async function run() {
   for (let i = 0; i < chunks.length; i++) {
     try {
       core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
-      const prompt = buildChunkPrompt(chunks[i], i, chunks.length);
-      const review = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
-      reviews.push({ index: i, review, success: true });
+      const prompt = ConversationalFeedback.buildPrompt(chunks[i], i, chunks.length);
+      const rawReview = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
+      const review = ConversationalFeedback.postProcess(rawReview);
+      // Prepend actionable security findings for this chunk
+      const chunkFindings = SecurityCheck.checkSecurity(chunks[i]);
+      let reviewWithSecurity = review;
+      if (chunkFindings.length > 0) {
+        const secHeader = '#### Security Findings (static analysis)\n';
+        const secList = chunkFindings.map(f => `- [${f.severity}] ${f.path}:${f.line} - ${f.message}`).join('\n');
+        reviewWithSecurity = `${secHeader}${secList}\n\n${review}`;
+      }
+      reviews.push({ index: i, rawReview, review: reviewWithSecurity, success: true });
     } catch (err) {
       core.warning(`Chunk ${i + 1}/${chunks.length} failed: ${err.message}`);
       failedChunks.push({ index: i, error: err.message });
-      reviews.push({ index: i, review: `**Error reviewing this chunk:** ${err.message}`, success: false });
+      reviews.push({ index: i, rawReview: '', review: `**Error reviewing this chunk:** ${err.message}`, success: false });
     }
   }
 
@@ -258,6 +326,34 @@ async function run() {
     });
     core.info('Review comment posted.');
   }
+
+  // Inline suggestion integration
+  // Extract actionable suggestions from reviews (simple heuristic: look for code suggestion blocks)
+  let actionableSuggestions = extractActionableSuggestions(reviews);
+
+  // Adapt suggestions based on feedback
+  actionableSuggestions = FeedbackLearning.adapt(repoId, actionableSuggestions);
+
+  if (actionableSuggestions.length > 0) {
+    try {
+      const postedSuggestions = await InlineSuggestion.postSuggestions(octokit, {
+        owner,
+        repo,
+        pullNumber,
+        suggestions: actionableSuggestions,
+      });
+
+      if (postedSuggestions > 0) {
+        core.info(`Posted ${postedSuggestions} inline suggestion(s).`);
+      }
+    } catch (err) {
+      core.warning(`Inline suggestions skipped: ${err.message}`);
+    }
+  }
+
+  // Listen for user feedback (accept/reject) via review events (pseudo-code, to be implemented in webhook or future extension)
+  // Example usage:
+  // FeedbackLearning.learnFromFeedback(repoId, suggestionId, accepted);
 }
 
 if (require.main === module) {
@@ -267,6 +363,7 @@ if (require.main === module) {
 module.exports = {
   splitIntoChunks,
   buildChunkPrompt,
+  extractActionableSuggestions,
   callZaiApi,
   callZaiApiWithRetry,
   RETRY_CONFIG,

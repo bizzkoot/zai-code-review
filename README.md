@@ -16,6 +16,47 @@ For small to medium-sized pull requests, the action sends all changes in a singl
 
 This ensures the action works reliably for PRs of any size without failing due to token limit errors.
 
+### Before (original) / After (Coderabbit-style)
+
+```
+### Before (original)                             ### After (Coderabbit-style)
+
++-----------------------+                         +-----------------------+
+|     Pull Request      |                         |     Pull Request      |
++-----------+-----------+                         +-----------+-----------+
+            |                                                 |
+            v                                                 v
++-----------+-----------+                         +-----------+-----------+
+| Chunking (large PRs)  |                         | Chunking (large PRs)  |
++-----------+-----------+                         +-----------+-----------+
+            |                                                 |
+            v                                                 v
++-----------+-----------+                         +-----------+-----------+
+|    Z.ai Chat API      |                         |     Orchestrator      |
++-----------+-----------+                         +-----------+-----------+
+            |                                         /               \
+            v                                        v                 v
++-----------+-----------+                +-------------------+ +-----------------------+
+|  Single PR comment    |                |  Security Checks  | | Conversational Feedb. |
++-----------------------+                +-------------------+ +-----------+-----------+
+                                                                           |
+                                                                           v
+                                                               +-----------+-----------+
+                                                               |  Inline Suggestions   |
+                                                               +-----------+-----------+
+                                                                           |
+                                                                           v
+                                                               +-----------+-----------+
+                                                               |   Feedback Learning   |
+                                                               +-----------+-----------+
+                                                                           |
+                                                                           v
+                                                               +-----------+-----------+
+                                                               | Merge & Post Comment  |
+                                                               +-----------------------+
+
+```
+
 ## Quickstart
 
 Add this to your `.github/workflows/code-review.yml`:
@@ -36,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.1
+        uses: bizzkoot/zai-code-review@v0.0.3
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           # Optional - uncomment and set in repo variables if needed

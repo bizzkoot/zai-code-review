@@ -29930,6 +29930,11 @@ const core = __nccwpck_require__(2186);
 const github = __nccwpck_require__(5438);
 const https = __nccwpck_require__(5687);
 
+const ConversationalFeedback = __nccwpck_require__(6282);
+const InlineSuggestion = __nccwpck_require__(4333);
+const FeedbackLearning = __nccwpck_require__(7934);
+const SecurityCheck = __nccwpck_require__(7443);
+
 const ZAI_API_URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
 const COMMENT_MARKER = '<!-- zai-code-review -->';
 const ERR_PREFIX = 'Z.ai API: ';
@@ -29964,9 +29969,7 @@ async function getChangedFiles(octokit, owner, repo, pullNumber) {
 function splitIntoChunks(files) {
   const filesWithPatches = files.filter(f => f.patch);
 
-  if (filesWithPatches.length === 0) {
-    return [];
-  }
+  if (filesWithPatches.length === 0) return [];
 
   const chunks = [];
   let currentChunk = [];
@@ -30007,6 +30010,49 @@ function buildChunkPrompt(files, chunkIndex, totalChunks) {
   prompt += diffs;
 
   return prompt;
+}
+
+function extractActionableSuggestions(reviews) {
+  const suggestions = [];
+  const seen = new Set();
+
+  for (const review of reviews) {
+    const content = review.rawReview || '';
+    const matches = Array.from(content.matchAll(/\[\[suggestion:(.+?)\]\]/gs));
+
+    for (const match of matches) {
+      const parts = match[1].split(':');
+      if (parts.length < 6 || parts[0] !== 'path' || parts[2] !== 'line') {
+        continue;
+      }
+
+      const line = Number(parts[3]);
+      const body = parts[4]?.trim();
+      const suggestion = parts.slice(5).join(':').trim();
+      const path = parts[1]?.trim();
+
+      if (!path || !Number.isInteger(line) || line < 1 || !body || !suggestion) {
+        continue;
+      }
+
+      const id = `${path}:${line}:${body}`;
+      if (seen.has(id)) {
+        continue;
+      }
+
+      seen.add(id);
+      suggestions.push({
+        id,
+        path,
+        line,
+        side: 'RIGHT',
+        body,
+        suggestion,
+      });
+    }
+  }
+
+  return suggestions;
 }
 
 function callZaiApi(apiKey, model, systemPrompt, prompt) {
@@ -30050,7 +30096,7 @@ function callZaiApi(apiKey, model, systemPrompt, prompt) {
           let parsed;
           try {
             parsed = JSON.parse(data);
-          } catch {
+          } catch (err) {
             reject(new Error(`${ERR_PREFIX}Invalid JSON response.`));
             return;
           }
@@ -30119,12 +30165,25 @@ async function run() {
 
   const octokit = github.getOctokit(token);
 
+  // FeedbackLearning repoId: owner/repo
+  const repoId = `${owner}/${repo}`;
+
   core.info(`Fetching changed files for PR #${pullNumber}...`);
+
   const files = await getChangedFiles(octokit, owner, repo, pullNumber);
 
   if (!files.some(f => f.patch)) {
     core.info('No patchable changes found. Skipping review.');
     return;
+  }
+
+  // --- SecurityCheck integration ---
+  const securityFindings = SecurityCheck.checkSecurity(files);
+  if (securityFindings.length > 0) {
+    core.warning(`Security findings detected: ${securityFindings.length}`);
+    for (const finding of securityFindings) {
+      core.warning(`[${finding.severity}] ${finding.path}:${finding.line} - ${finding.message}`);
+    }
   }
 
   const chunks = splitIntoChunks(files);
@@ -30136,13 +30195,22 @@ async function run() {
   for (let i = 0; i < chunks.length; i++) {
     try {
       core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
-      const prompt = buildChunkPrompt(chunks[i], i, chunks.length);
-      const review = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
-      reviews.push({ index: i, review, success: true });
+      const prompt = ConversationalFeedback.buildPrompt(chunks[i], i, chunks.length);
+      const rawReview = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
+      const review = ConversationalFeedback.postProcess(rawReview);
+      // Prepend actionable security findings for this chunk
+      const chunkFindings = SecurityCheck.checkSecurity(chunks[i]);
+      let reviewWithSecurity = review;
+      if (chunkFindings.length > 0) {
+        const secHeader = '#### Security Findings (static analysis)\n';
+        const secList = chunkFindings.map(f => `- [${f.severity}] ${f.path}:${f.line} - ${f.message}`).join('\n');
+        reviewWithSecurity = `${secHeader}${secList}\n\n${review}`;
+      }
+      reviews.push({ index: i, rawReview, review: reviewWithSecurity, success: true });
     } catch (err) {
       core.warning(`Chunk ${i + 1}/${chunks.length} failed: ${err.message}`);
       failedChunks.push({ index: i, error: err.message });
-      reviews.push({ index: i, review: `**Error reviewing this chunk:** ${err.message}`, success: false });
+      reviews.push({ index: i, rawReview: '', review: `**Error reviewing this chunk:** ${err.message}`, success: false });
     }
   }
 
@@ -30186,6 +30254,34 @@ async function run() {
     });
     core.info('Review comment posted.');
   }
+
+  // Inline suggestion integration
+  // Extract actionable suggestions from reviews (simple heuristic: look for code suggestion blocks)
+  let actionableSuggestions = extractActionableSuggestions(reviews);
+
+  // Adapt suggestions based on feedback
+  actionableSuggestions = FeedbackLearning.adapt(repoId, actionableSuggestions);
+
+  if (actionableSuggestions.length > 0) {
+    try {
+      const postedSuggestions = await InlineSuggestion.postSuggestions(octokit, {
+        owner,
+        repo,
+        pullNumber,
+        suggestions: actionableSuggestions,
+      });
+
+      if (postedSuggestions > 0) {
+        core.info(`Posted ${postedSuggestions} inline suggestion(s).`);
+      }
+    } catch (err) {
+      core.warning(`Inline suggestions skipped: ${err.message}`);
+    }
+  }
+
+  // Listen for user feedback (accept/reject) via review events (pseudo-code, to be implemented in webhook or future extension)
+  // Example usage:
+  // FeedbackLearning.learnFromFeedback(repoId, suggestionId, accepted);
 }
 
 if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
@@ -30195,10 +30291,311 @@ if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
 module.exports = {
   splitIntoChunks,
   buildChunkPrompt,
+  extractActionableSuggestions,
   callZaiApi,
   callZaiApiWithRetry,
   RETRY_CONFIG,
 };
+
+
+/***/ }),
+
+/***/ 6282:
+/***/ ((module) => {
+
+// Handles conversational feedback logic for code review
+class ConversationalFeedback {
+  /**
+   * Builds a context-aware, developer-friendly review prompt for Z.ai
+   * @param {Array} files - PR files (with patch, filename, status)
+   * @param {number} chunkIndex - Index of this chunk
+   * @param {number} totalChunks - Total number of chunks
+   * @returns {string} Prompt for Z.ai
+   */
+  static buildPrompt(files, chunkIndex, totalChunks) {
+    const diffs = files
+      .filter(f => f.patch)
+      .map(f => `### ${f.filename} (${f.status})\n\u0060\u0060\u0060diff\n${f.patch}\n\u0060\u0060\u0060`)
+      .join('\n\n');
+
+    let prompt = [
+      'You are a friendly, expert code reviewer. Review the following pull request changes and provide clear, actionable, and developer-friendly feedback.',
+      'Focus on bugs, logic errors, security issues, and meaningful improvements. Skip trivial style comments.',
+      'Write in a conversational, encouraging tone. Use bullet points for clarity. Suggest concrete next steps where possible.',
+      'Only emit a suggestion marker when you have a high-confidence, line-specific replacement for code shown in the diff.',
+      'Use this exact format for each actionable inline fix: [[suggestion:path:<file path>:line:<new file line>:<short summary>:<replacement code>]].',
+      'Do not emit suggestion markers for uncertain advice, general feedback, or code that is not visible in the diff.',
+      '',
+    ].join(' ');
+
+    if (totalChunks > 1) {
+      prompt += `\n[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus only on this section.]\n`;
+    }
+
+    prompt += '\n' + diffs;
+    return prompt;
+  }
+
+  /**
+   * Post-processes Z.ai feedback for clarity and developer-friendliness
+   * @param {string} feedback - Raw Z.ai response
+   * @returns {string} Cleaned, actionable feedback
+   */
+  static postProcess(feedback) {
+    if (!feedback) return '';
+    // Remove excessive apologies, generic phrases, and ensure bullet points
+    let result = feedback
+      .replace(/(?:(?:I\s+)?(?:have|has) reviewed(?: the)? changes?\.?|Here(?: are| is) (?:my|the)? feedback:?|Below (?:are|is) (?:my|the)? (?:feedback|comments):?)/gi, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/^-\s*/gm, '• ')
+      .trim();
+    // Ensure at least one actionable suggestion
+    if (!/• /.test(result)) {
+      result = '• ' + result;
+    }
+    return result;
+  }
+}
+
+module.exports = ConversationalFeedback;
+
+
+/***/ }),
+
+/***/ 7934:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+
+const fs = __nccwpck_require__(7147);
+const path = __nccwpck_require__(1017);
+
+// FeedbackLearning: Tracks user responses to suggestions and adapts future reviews
+// Stores preferences per repo/team in .zai-feedback.json in project root
+class FeedbackLearning {
+  constructor(repoId) {
+    this.repoId = repoId;
+    this.dataFile = path.resolve(process.cwd(), '.zai-feedback.json');
+    this._load();
+  }
+
+  _load() {
+    try {
+      if (fs.existsSync(this.dataFile)) {
+        const raw = fs.readFileSync(this.dataFile, 'utf8');
+        this.data = JSON.parse(raw);
+      } else {
+        this.data = {};
+      }
+    } catch (e) {
+      this.data = {};
+    }
+    if (!this.data[this.repoId]) this.data[this.repoId] = { accepted: {}, rejected: {} };
+  }
+
+  _save() {
+    fs.writeFileSync(this.dataFile, JSON.stringify(this.data, null, 2));
+  }
+
+  recordFeedback(suggestionId, accepted) {
+    if (!suggestionId) return;
+    const pref = this.data[this.repoId];
+    if (accepted) {
+      pref.accepted[suggestionId] = (pref.accepted[suggestionId] || 0) + 1;
+      delete pref.rejected[suggestionId];
+    } else {
+      pref.rejected[suggestionId] = (pref.rejected[suggestionId] || 0) + 1;
+      delete pref.accepted[suggestionId];
+    }
+    this._save();
+  }
+
+  getPreference(suggestionId) {
+    const pref = this.data[this.repoId];
+    if (pref.accepted[suggestionId]) return 'accepted';
+    if (pref.rejected[suggestionId]) return 'rejected';
+    return null;
+  }
+
+  // Optionally: adapt suggestions based on feedback
+  adaptSuggestions(suggestions) {
+    return suggestions.filter(s => this.getPreference(s.id) !== 'rejected');
+  }
+
+  static learnFromFeedback(repoId, suggestionId, accepted) {
+    const learner = new FeedbackLearning(repoId);
+    learner.recordFeedback(suggestionId, accepted);
+  }
+
+  static adapt(repoId, suggestions) {
+    const learner = new FeedbackLearning(repoId);
+    return learner.adaptSuggestions(suggestions);
+  }
+}
+
+module.exports = FeedbackLearning;
+
+
+/***/ }),
+
+/***/ 4333:
+/***/ ((module) => {
+
+// Handles inline suggestion logic for code review
+class InlineSuggestion {
+  static buildComments(suggestions) {
+    return (suggestions || [])
+      .filter(s => s.suggestion && Number.isInteger(s.line) && s.line > 0)
+      .map(s => ({
+        path: s.path,
+        body: `${s.body}\n\u0060\u0060\u0060suggestion\n${s.suggestion}\n\u0060\u0060\u0060`,
+        line: s.line,
+        side: s.side || 'RIGHT',
+      }));
+  }
+
+  static isValidationError(err) {
+    return err?.status === 422 || /validation/i.test(err?.message || '');
+  }
+
+  /**
+   * Posts actionable, line-specific suggestions as a GitHub review
+   * @param {object} octokit - Authenticated Octokit instance
+   * @param {object} params
+   *   owner: repo owner
+   *   repo: repo name
+   *   pullNumber: PR number
+   *   suggestions: Array<{ path, body, line, side, suggestion }>
+   */
+  static async postSuggestions(octokit, { owner, repo, pullNumber, suggestions }) {
+    const comments = InlineSuggestion.buildComments(suggestions);
+
+    if (comments.length === 0) {
+      return 0;
+    }
+
+    try {
+      await octokit.rest.pulls.createReview({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        event: 'COMMENT',
+        comments,
+      });
+
+      return comments.length;
+    } catch (err) {
+      if (comments.length === 1 || !InlineSuggestion.isValidationError(err)) {
+        throw err;
+      }
+    }
+
+    let postedCount = 0;
+    for (const comment of comments) {
+      try {
+        await octokit.rest.pulls.createReview({
+          owner,
+          repo,
+          pull_number: pullNumber,
+          event: 'COMMENT',
+          comments: [comment],
+        });
+        postedCount++;
+      } catch (err) {
+        if (!InlineSuggestion.isValidationError(err)) {
+          throw err;
+        }
+      }
+    }
+
+    return postedCount;
+  }
+}
+
+module.exports = InlineSuggestion;
+
+
+/***/ }),
+
+/***/ 7443:
+/***/ ((module) => {
+
+// Handles security check logic for code review (stub for future extension)
+
+// Handles security check logic for code review
+class SecurityCheck {
+  /**
+   * Runs static analysis and best-practice checks on diffs
+   * @param {Array} files - PR files (with patch, filename, status)
+   * @returns {Array} Array of security findings: { path, line, message, severity }
+   */
+  static checkSecurity(files) {
+    const findings = [];
+    if (!Array.isArray(files)) return findings;
+
+    for (const file of files) {
+      if (!file.patch || !file.filename) continue;
+      const lines = file.patch.split('\n');
+      let lineNum = 0;
+      for (const line of lines) {
+        lineNum++;
+        // Only analyze added lines
+        if (!line.startsWith('+') || line.startsWith('+++')) continue;
+        const code = line.slice(1);
+
+        // Simple static checks (expand as needed)
+        // 1. Hardcoded secrets
+        if (/(['"]?api[_-]?key['"]?\s*[:=]\s*['"][A-Za-z0-9\-_]{16,}['"]|['"]?secret['"]?\s*[:=]\s*['"][A-Za-z0-9\-_]{8,}['"])/i.test(code)) {
+          findings.push({
+            path: file.filename,
+            line: lineNum,
+            message: 'Possible hardcoded secret or API key.',
+            severity: 'high',
+          });
+        }
+        // 2. Insecure eval usage
+        if (/\beval\s*\(/.test(code)) {
+          findings.push({
+            path: file.filename,
+            line: lineNum,
+            message: 'Use of eval() detected. This is unsafe and should be avoided.',
+            severity: 'high',
+          });
+        }
+        // 3. Insecure regex for password
+        if (/password\s*[:=]\s*['"][^'"]{0,7}['"]/.test(code)) {
+          findings.push({
+            path: file.filename,
+            line: lineNum,
+            message: 'Possible weak or hardcoded password.',
+            severity: 'high',
+          });
+        }
+        // 4. Disabled lint/security checks
+        if (/eslint-disable|tslint:disable|security-disable/i.test(code)) {
+          findings.push({
+            path: file.filename,
+            line: lineNum,
+            message: 'Lint or security checks disabled in code.',
+            severity: 'medium',
+          });
+        }
+        // 5. Dangerous function usage (exec, Function)
+        if (/\b(require\(['"]child_process['"]\)|exec\s*\(|new Function\s*\()/i.test(code)) {
+          findings.push({
+            path: file.filename,
+            line: lineNum,
+            message: 'Dangerous function usage (exec, Function constructor, child_process).',
+            severity: 'high',
+          });
+        }
+        // 6. TODO: Add more rules as needed
+      }
+    }
+    return findings;
+  }
+}
+
+module.exports = SecurityCheck;
 
 
 /***/ }),

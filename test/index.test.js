@@ -1,6 +1,7 @@
 const {
   splitIntoChunks,
   buildChunkPrompt,
+  extractActionableSuggestions,
   RETRY_CONFIG,
 } = require('../src/index');
 
@@ -71,5 +72,40 @@ describe('RETRY_CONFIG', () => {
     expect(RETRY_CONFIG.maxRetries).toBeGreaterThan(0);
     expect(RETRY_CONFIG.baseDelayMs).toBeGreaterThan(0);
     expect(RETRY_CONFIG.maxDelayMs).toBeGreaterThanOrEqual(RETRY_CONFIG.baseDelayMs);
+  });
+});
+
+describe('extractActionableSuggestions', () => {
+  test('extracts valid unique suggestion markers from raw reviews', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/index.js:line:10:Use const:const value = 1;]]\n[[suggestion:path:src/index.js:line:10:Use const:const value = 1;]]',
+      },
+    ];
+
+    expect(extractActionableSuggestions(reviews)).toEqual([
+      {
+        id: 'src/index.js:10:Use const',
+        path: 'src/index.js',
+        line: 10,
+        side: 'RIGHT',
+        body: 'Use const',
+        suggestion: 'const value = 1;',
+      },
+    ]);
+  });
+
+  test('ignores malformed suggestions and invalid lines', () => {
+    const reviews = [
+      {
+        rawReview: [
+          '[[suggestion:path:src/index.js:line:not-a-number:Bad:const value = 1;]]',
+          '[[suggestion:path::line:12:Missing path:const value = 2;]]',
+          '[[suggestion:path:src/index.js:line:0:Bad line:const value = 3;]]',
+        ].join('\n'),
+      },
+    ];
+
+    expect(extractActionableSuggestions(reviews)).toEqual([]);
   });
 });

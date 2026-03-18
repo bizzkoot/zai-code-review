@@ -1,7 +1,7 @@
 name: AI Code Review with Z.ai
 
 # NOTE: This workflow is for testing this action on itself.
-# For use in other repositories, replace 'bizzkoot/zai-code-review@v0.0.1'
+# For use in other repositories, replace 'bizzkoot/zai-code-review@v0.0.3'
 # with your fork or the published action version.
 
 on:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.1
+        uses: bizzkoot/zai-code-review@v0.0.3
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL }}

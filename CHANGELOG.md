@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - 2026-03-19
+
+### Added
+- review helper modules for conversational feedback, static security checks, inline suggestions, and feedback filtering
+- unit coverage for the new helper modules and inline suggestion extraction
+
+### Fixed
+- inline suggestions are now best-effort so invalid GitHub review anchors no longer fail the entire action run
+- release automation now requests `contents: write` before creating releases and pushing changelog updates
+- package, lockfile, changelog, and usage examples are aligned for the `v0.0.3` release
+
+## [0.0.2] - 2026-03-19
+
+### Changed
+- fix: remove dist/ from gitignore and add to git for GitHub Actions releases
+- docs: simplify README with unified workflow example
+
 ## [0.0.1] - 2026-03-18
 
 ### Added
@@ -58,3 +75,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.0.1]: https://github.com/bizzkoot/zai-code-review/releases/tag/v0.0.1
 
 [0.0.2]: https://github.com/bizzkoot/zai-code-review/releases/tag/v0.0.2
+
+[0.0.3]: https://github.com/bizzkoot/zai-code-review/releases/tag/v0.0.3

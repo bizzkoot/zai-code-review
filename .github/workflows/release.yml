@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   release:
     name: Create Release
@@ -89,24 +92,84 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update CHANGELOG.md with release link
+      - name: Update CHANGELOG.md with release section and link
         if: steps.check_tag.outputs.exists == 'false'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           
-          # Check if link already exists
-          LINK="[$VERSION]: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
-          if ! grep -q "\[$VERSION\]:" CHANGELOG.md; then
-            echo "" >> CHANGELOG.md
-            echo "$LINK" >> CHANGELOG.md
-            
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            git config --local user.name "github-actions[bot]"
-            git add CHANGELOG.md
-            git commit -m "docs: add release link for v$VERSION"
-            git push
-          else
-            echo "Release link already exists in CHANGELOG.md"
+          # Check if section already exists
+          if grep -q "## \[$VERSION\]" CHANGELOG.md; then
+            echo "Version section already exists in CHANGELOG.md"
+            exit 0
           fi
+          
+          # Get the date for the release
+          DATE=$(date +%Y-%m-%d)
+          
+          # Get last tag for changelog content
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          # Parse commit messages into categories
+          ADDED=""
+          CHANGED=""
+          FIXED=""
+          
+          if [ -n "$LAST_TAG" ]; then
+            while IFS= read -r line; do
+              # Remove the '- ' prefix
+              msg="${line#- }"
+              
+              # Categorize by prefix
+              case "$msg" in
+                feat:*|feature:*|*add*|*new*)
+                  ADDED="${ADDED}- ${msg}\n"
+                  ;;
+                fix:*|*bug*|*fix*)
+                  FIXED="${FIXED}- ${msg}\n"
+                  ;;
+                *)
+                  CHANGED="${CHANGED}- ${msg}\n"
+                  ;;
+              esac
+            done < <(git log "$LAST_TAG..HEAD" --pretty='- %s' 2>/dev/null)
+          fi
+          
+          # Build the new section
+          NEW_SECTION="## [$VERSION] - $DATE"
+          
+          # Add categories if they have content
+          if [ -n "$ADDED" ]; then
+            NEW_SECTION="$NEW_SECTION\n\n### Added\n${ADDED}"
+          fi
+          if [ -n "$CHANGED" ]; then
+            NEW_SECTION="$NEW_SECTION\n### Changed\n${CHANGED}"
+          fi
+          if [ -n "$FIXED" ]; then
+            NEW_SECTION="$NEW_SECTION\n### Fixed\n${FIXED}"
+          fi
+          
+          # If no categorized content, add as generic
+          if [ -z "$ADDED" ] && [ -z "$CHANGED" ] && [ -z "$FIXED" ]; then
+            NEW_SECTION="$NEW_SECTION\n\n### Changed\n$(git log "$LAST_TAG..HEAD" --pretty='- %s' 2>/dev/null)"
+          fi
+          
+          # Build the link line
+          LINK="[$VERSION]: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
+          
+          # Insert section before the last link line (e.g., [0.0.1]: ...)
+          # If no previous links exist, append before EOF
+          if grep -q '^\[.*\]: https://github.com/' CHANGELOG.md; then
+            # Insert before the last link line
+            sed -i "/^\[.*\]: https:\/\/github.com\/${{ github.repository }}\/releases\/tag\//i\\$NEW_SECTION\n$LINK\n" CHANGELOG.md
+          else
+            # No existing links, append at end
+            echo -e "\n$NEW_SECTION\n\n$LINK" >> CHANGELOG.md
+          fi
+          
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add CHANGELOG.md
+          git commit -m "docs: add changelog section and release link for v$VERSION"
+          git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

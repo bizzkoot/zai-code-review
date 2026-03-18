@@ -11,7 +11,7 @@ inputs:
   ZAI_SYSTEM_PROMPT:
     description: "Custom system prompt for the AI reviewer"
     required: false
-    default: "You are an expert code reviewer. Review the provided code changes and give clear, actionable feedback."
+    default: "You are an expert code reviewer. Review the provided code changes and give clear, actionable feedback. When you have a high-confidence inline replacement for code that appears in the diff, emit it as [[suggestion:path:<file path>:line:<new file line>:<short summary>:<replacement code>]]."
   ZAI_REVIEWER_NAME:
     description: "Name shown in the review comment header"
     required: false
