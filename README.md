@@ -8,6 +8,13 @@ AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comme
 - 🔍 Suggest improvements
 - 🧠 AI-driven PR feedback
 - ⚡ Works with GitHub Actions
+- 📦 Automatic chunking for large PRs
+
+## How It Works
+
+For small to medium-sized pull requests, the action sends all changes in a single API request to Z.ai. For larger PRs that exceed API token limits, the action automatically splits the changes into multiple chunks and processes them separately. The results are then combined into a single review comment on the PR.
+
+This ensures the action works reliably for PRs of any size without failing due to token limit errors.
 
 ## Quickstart
 

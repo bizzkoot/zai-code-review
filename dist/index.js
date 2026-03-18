@@ -31842,6 +31842,7 @@ const ZAI_API_URL = 'https://api.z.ai/api/coding/paas/v4/chat/completions';
 const COMMENT_MARKER = '<!-- zai-code-review -->';
 const MAX_RESPONSE_SIZE = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 300_000;
+const MAX_CHUNK_SIZE = 50000;
 
 async function getChangedFiles(octokit, owner, repo, pullNumber) {
   const files = [];
@@ -31868,6 +31869,50 @@ function buildPrompt(files) {
     .join('\n\n');
 
   return `Please review the following pull request changes and provide concise, constructive feedback. Focus on bugs, logic errors, security issues, and meaningful improvements. Skip trivial style comments.\n\n${diffs}`;
+}
+
+function splitIntoChunks(files) {
+  const chunks = [];
+  let currentChunk = [];
+  let currentSize = 0;
+
+  for (const file of files) {
+    if (!file.patch) continue;
+
+    const fileSize = file.patch.length;
+
+    if (currentSize + fileSize > MAX_CHUNK_SIZE && currentChunk.length > 0) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+      currentSize = 0;
+    }
+
+    currentChunk.push(file);
+    currentSize += fileSize;
+  }
+
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+function buildChunkPrompt(files, chunkIndex, totalChunks) {
+  const diffs = files
+    .filter(f => f.patch)
+    .map(f => `### ${f.filename} (${f.status})\n\`\`\`diff\n${f.patch}\n\`\`\``)
+    .join('\n\n');
+
+  let prompt = `Please review the following pull request changes and provide concise, constructive feedback. Focus on bugs, logic errors, security issues, and meaningful improvements. Skip trivial style comments.\n\n`;
+
+  if (totalChunks > 1) {
+    prompt += `[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus on the changes in this section only.]\n\n`;
+  }
+
+  prompt += diffs;
+
+  return prompt;
 }
 
 function callZaiApi(apiKey, model, systemPrompt, prompt) {
@@ -31964,11 +32009,28 @@ async function run() {
     return;
   }
 
-  const prompt = buildPrompt(files);
+  const chunks = splitIntoChunks(files);
+  core.info(`Processing ${files.length} file(s) in ${chunks.length} chunk(s)...`);
 
-  core.info(`Sending ${files.length} file(s) to Z.ai for review...`);
-  const review = await callZaiApi(apiKey, model, systemPrompt, prompt);
-  const body = `## ${reviewerName}\n\n${review}\n\n${COMMENT_MARKER}`;
+  const reviews = [];
+  for (let i = 0; i < chunks.length; i++) {
+    core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
+    const prompt = buildChunkPrompt(chunks[i], i, chunks.length);
+    const review = await callZaiApi(apiKey, model, systemPrompt, prompt);
+    reviews.push(review);
+  }
+
+  let combinedReview;
+  if (chunks.length > 1) {
+    combinedReview = reviews
+      .map((review, index) => `### Chunk ${index + 1}/${chunks.length}\n\n${review}`)
+      .join('\n\n---\n\n');
+    core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
+  } else {
+    combinedReview = reviews[0];
+  }
+
+  const body = `## ${reviewerName}\n\n${combinedReview}\n\n${COMMENT_MARKER}`;
 
   const { data: comments } = await octokit.rest.issues.listComments({
     owner,
