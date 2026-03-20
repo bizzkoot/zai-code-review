@@ -1,6 +1,158 @@
 // Handles conversational feedback logic for code review
 class ConversationalFeedback {
   /**
+   * Parses raw review text and extracts findings with severity and details
+   * @param {string} rawReview - Raw review text
+   * @returns {Array} Array of finding objects with severity, title, problem, impact, fix, prompt
+   * @private
+   */
+  static parseFindings(rawReview) {
+    if (!rawReview || typeof rawReview !== 'string') {
+      return [];
+    }
+
+    const findings = [];
+    const lines = rawReview.split('\n');
+    let current = null;
+    let currentSection = null;
+
+    for (const line of lines) {
+      // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
+      const severityMatch = line.match(/^#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
+      if (severityMatch) {
+        if (current) {
+          findings.push(current);
+        }
+        const severity = severityMatch[1].toUpperCase();
+        const location = severityMatch[2];
+        const title = severityMatch[3] || location;
+        const isOutsideDiff = location.includes('(outside diff)');
+
+        current = {
+          severity: normalizeSeverity(severity),
+          location,
+          title: title.replace(/\s*\(outside diff\)\s*/gi, '').trim(),
+          isOutsideDiff,
+          problem: '',
+          impact: '',
+          fix: '',
+          prompt: ''
+        };
+        currentSection = null;
+        continue;
+      }
+
+      if (!current) continue;
+
+      // Match section headers within a finding
+      if (line.match(/^\*{2}Problem:\*{2}/i)) {
+        currentSection = 'problem';
+        continue;
+      }
+      if (line.match(/^\*{2}Impact:\*{2}/i)) {
+        currentSection = 'impact';
+        continue;
+      }
+      if (line.match(/^\*{2}Suggested fix:\*{2}/i)) {
+        currentSection = 'fix';
+        continue;
+      }
+      if (line.match(/^\*{2}Prompt for AI Agents:\*{2}/i)) {
+        currentSection = 'prompt';
+        continue;
+      }
+
+      // Append to current section
+      if (currentSection) {
+        if (current[currentSection]) {
+          current[currentSection] += '\n' + line;
+        } else {
+          current[currentSection] = line;
+        }
+      }
+    }
+
+    if (current) {
+      findings.push(current);
+    }
+
+    return findings.map(f => ({
+      ...f,
+      problem: f.problem.trim(),
+      impact: f.impact.trim(),
+      fix: f.fix.trim(),
+      prompt: f.prompt.trim()
+    }));
+  }
+
+  /**
+   * Groups findings by severity level
+   * @param {Array} findings - Array of finding objects
+   * @returns {Object} Object with critical, major, minor arrays
+   * @private
+   */
+  static groupBySeverity(findings) {
+    const grouped = {
+      critical: [],
+      major: [],
+      minor: [],
+      info: []
+    };
+
+    for (const finding of findings) {
+      switch (finding.severity) {
+      case 'critical':
+      case 'blocker':
+        grouped.critical.push(finding);
+        break;
+      case 'major':
+        grouped.major.push(finding);
+        break;
+      case 'minor':
+        grouped.minor.push(finding);
+        break;
+      case 'info':
+      default:
+        grouped.info.push(finding);
+      }
+    }
+
+    return grouped;
+  }
+
+  /**
+   * Formats a single finding with all its details
+   * @param {Object} finding - Finding object with severity, title, problem, impact, fix, prompt
+   * @returns {string} Formatted finding in markdown
+   * @private
+   */
+  static formatFinding(finding) {
+    let output = `**${finding.title}**`;
+
+    if (finding.isOutsideDiff) {
+      output = `**(outside diff) ${finding.title}**`;
+    }
+
+    if (finding.problem) {
+      output += `\n**Problem:** ${finding.problem}`;
+    }
+
+    if (finding.impact) {
+      output += `\n**Impact:** ${finding.impact}`;
+    }
+
+    if (finding.fix) {
+      output += `\n**Suggested fix:**\n${finding.fix}`;
+    }
+
+    if (finding.prompt) {
+      output += `\n**Prompt for AI Agents:**\n${finding.prompt}`;
+    }
+
+    return output;
+  }
+
+  /**
    * Builds a context-aware, developer-friendly review prompt for Z.ai
    * @param {Array} files - PR files (with patch, filename, status)
    * @param {number} chunkIndex - Index of this chunk
@@ -23,11 +175,34 @@ class ConversationalFeedback {
       '',
     ].join(' ');
 
+    // Add format instructions
+    const formatInstructions = `
+Format each finding as follows:
+
+## [SEVERITY] File:Line - Brief Title
+**Problem:** Description of the issue
+**Impact:** Why this matters
+**Suggested fix:**
+\`\`\`diff
+- bad code
++ good code
+\`\`\`
+**Prompt for AI Agents:**
+\`\`\`
+Specific instructions for AI verification and fix.
+\`\`\`
+
+Group findings by severity: BLOCKER > CRITICAL > Major > Minor > Info.
+Mark findings outside the diff with "(outside diff)" before the title.
+`.trim();
+
+    prompt += '\n\n' + formatInstructions;
+
     if (totalChunks > 1) {
-      prompt += `\n[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus only on this section.]\n`;
+      prompt += `\n\n[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus only on this section.]\n`;
     }
 
-    prompt += '\n' + diffs;
+    prompt += '\n\n' + diffs;
     return prompt;
   }
 
@@ -50,6 +225,168 @@ class ConversationalFeedback {
     }
     return result;
   }
+
+  /**
+   * Separates outside-diff comments from inline comments based on "(outside diff)" markers
+   * @param {string} rawReview - Raw review text from the AI
+   * @returns {Object} Object with inlineComments and outsideDiffComments
+   */
+  static separateOutsideDiffComments(rawReview) {
+    if (!rawReview || typeof rawReview !== 'string') {
+      return { inlineComments: '', outsideDiffComments: [] };
+    }
+
+    const inlineComments = [];
+    const outsideDiffComments = [];
+
+    const lines = rawReview.split('\n');
+    let currentSection = 'inline';
+    let currentFinding = null;
+
+    for (const line of lines) {
+      const isOutsideMarker = line.includes('(outside diff)') || line.includes('(outside the diff)');
+
+      if (isOutsideMarker) {
+        if (currentSection === 'inline') {
+          currentSection = 'outside';
+        }
+        if (currentFinding) {
+          outsideDiffComments.push(currentFinding);
+        }
+        currentFinding = { line, content: [line] };
+      } else if (line.match(/^#{1,3}\s+\[/) && currentSection === 'outside') {
+        if (currentFinding && currentFinding.content.length > 0) {
+          outsideDiffComments.push(currentFinding);
+        }
+        currentFinding = { line, content: [line] };
+      } else if (currentSection === 'inline') {
+        inlineComments.push(line);
+      } else if (currentFinding) {
+        currentFinding.content.push(line);
+      }
+    }
+
+    if (currentFinding && currentFinding.content.length > 0 && currentSection === 'outside') {
+      if (!outsideDiffComments.find(f => f.line === currentFinding.line)) {
+        outsideDiffComments.push(currentFinding);
+      }
+    }
+
+    return { inlineComments: inlineComments.join('\n'), outsideDiffComments };
+  }
+
+  /**
+   * Formats outside-diff comments into a collapsible section grouped by file
+   * @param {Array} outsideDiffComments - Array of outside-diff comment objects
+   * @returns {string} Formatted markdown section or empty string if no comments
+   */
+  static formatOutsideDiffSection(outsideDiffComments) {
+    if (!outsideDiffComments || outsideDiffComments.length === 0) {
+      return '';
+    }
+
+    let output = `\n<details>\n<summary>⚠️ Outside diff range comments (${outsideDiffComments.length})</summary><blockquote>\n\n`;
+
+    const byFile = {};
+    for (const comment of outsideDiffComments) {
+      const content = comment.content.join('\n');
+      const fileMatch = content.match(/`([^`]+)`/);
+      let file = fileMatch ? fileMatch[1] : 'General';
+      // Extract just the filename without line number (e.g., "src/foo.js:5" -> "src/foo.js")
+      file = file.split(':')[0];
+      if (!byFile[file]) byFile[file] = [];
+      byFile[file].push(comment);
+    }
+
+    for (const [file, comments] of Object.entries(byFile)) {
+      output += `<details>\n<summary>${file} (${comments.length})</summary><blockquote>\n\n`;
+      for (const comment of comments) {
+        output += comment.content.join('\n') + '\n\n';
+      }
+      output += '</blockquote></details>\n\n';
+    }
+
+    output += '</blockquote></details>\n';
+    return output;
+  }
+
+  /**
+   * Formats raw review text into a structured markdown output with collapsible sections
+   * @param {string} rawReview - Raw review text from the AI
+   * @param {Object} options - Formatting options
+   * @param {number} options.actionableCount - Number of actionable comments posted inline
+   * @param {boolean} options.hasCriticalOutsideDiff - Whether critical comments exist outside diff
+   * @param {Array} options.outsideDiffComments - Array of outside-diff comment objects
+   * @returns {string} Formatted review with collapsible sections grouped by severity
+   */
+  static formatReview(rawReview, options = {}) {
+    const {
+      actionableCount = 0,
+      hasCriticalOutsideDiff = false,
+      outsideDiffComments = []
+    } = options;
+
+    let output = `**Actionable comments posted: ${actionableCount}**\n\n`;
+
+    if (actionableCount > 0) {
+      output += '> [!NOTE]\n> Due to the large number of review comments, Critical severity comments were prioritized as inline comments.\n\n';
+    }
+
+    if (hasCriticalOutsideDiff) {
+      output += '> [!CAUTION]\n> Some comments are outside the diff and can\'t be posted inline due to platform limitations.\n\n';
+    }
+
+    // Parse and group findings by severity
+    const findings = ConversationalFeedback.parseFindings(rawReview);
+    const grouped = ConversationalFeedback.groupBySeverity(findings);
+
+    // Add critical section
+    if (grouped.critical.length > 0) {
+      output += `<details>\n<summary>🔴 Critical/BLOCKER findings (${grouped.critical.length})</summary><blockquote>\n\n`;
+      output += grouped.critical.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add major section
+    if (grouped.major.length > 0) {
+      output += `<details>\n<summary>🟠 Major comments (${grouped.major.length})</summary><blockquote>\n\n`;
+      output += grouped.major.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add minor section
+    if (grouped.minor.length > 0) {
+      output += `<details>\n<summary>🟡 Minor comments (${grouped.minor.length})</summary><blockquote>\n\n`;
+      output += grouped.minor.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add info section
+    if (grouped.info.length > 0) {
+      output += `<details>\n<summary>ℹ️ Info comments (${grouped.info.length})</summary><blockquote>\n\n`;
+      output += grouped.info.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add outside-diff section
+    const outsideDiffSection = ConversationalFeedback.formatOutsideDiffSection(outsideDiffComments);
+    if (outsideDiffSection) {
+      output += outsideDiffSection;
+    }
+
+    return output.trim();
+  }
+}
+
+// Normalizes severity labels to a standard format
+function normalizeSeverity(severity) {
+  const normalized = severity.toUpperCase();
+  if (normalized === 'BLOCKER') return 'critical';
+  if (normalized === 'CRITICAL') return 'critical';
+  if (normalized === 'MAJOR') return 'major';
+  if (normalized === 'MINOR') return 'minor';
+  if (normalized === 'INFO') return 'info';
+  return 'info';
 }
 
 module.exports = ConversationalFeedback;

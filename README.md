@@ -1,65 +1,48 @@
 # Z.ai Code Review
 
-AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comments, bug detection, and improvement suggestions via GitHub Actions.
+AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comments, bug detection, improvement suggestions, security checks, and feedback learning via GitHub Actions.
 
-## Features
+**Latest version: v0.0.4**
 
-- 🚀 Detect bugs
-- 🔍 Suggest improvements
-- 🧠 AI-driven PR feedback
-- ⚡ Works with GitHub Actions
-- 📦 Automatic chunking for large PRs
+## ✨ What's New in v0.0.4
 
-## How It Works
+- 🔒 **Static security checks** - Automatically detects hardcoded secrets, dangerous functions, and security vulnerabilities
+- 🧠 **Feedback learning** - Adapts suggestions based on your team's accepted/rejected feedback
+- 🧵 **Threaded comments** - Smart deduplication that replies to existing threads instead of creating duplicates
+- 📊 **Severity grouping** - Findings organized by severity (Critical, Major, Minor, Info) in collapsible sections
 
-For small to medium-sized pull requests, the action sends all changes in a single API request to Z.ai. For larger PRs that exceed API token limits, the action automatically splits the changes into multiple chunks and processes them separately. The results are then combined into a single review comment on the PR.
+## 🎯 Features
 
-This ensures the action works reliably for PRs of any size without failing due to token limit errors.
+- 🐛 **Bug detection** - Identifies logic errors, bugs, and potential runtime issues
+- ✨ **Improvement suggestions** - Actionable recommendations for code quality
+- 🤖 **AI-driven review** - Leverages Z.ai models for contextual code review
+- ⚡ **GitHub Actions native** - Runs automatically on PR events
+- 💬 **Inline code suggestions** - Posts actionable diff suggestions as GitHub review comments
+- 🔒 **Static security checks** - Scans for hardcoded secrets, eval, dangerous functions, disabled lint
+- 📈 **Feedback learning** - Adapts future suggestions based on accepted/rejected feedback
 
-### Before (original) / After (Coderabbit-style)
+<details>
+<summary>📦 Advanced Features</summary>
 
-```
-### Before (original)                             ### After (Coderabbit-style)
+- 📦 **Large PR support** - Automatic chunking for PRs that exceed token limits
+- 🚫 **Comment deduplication** - Prevents duplicate suggestions across chunks and reviews
+- 🧵 **Threaded comments** - Replies to existing threads instead of creating duplicates
+- ⏭️ **Resolved comment filtering** - Skips suggestions on already-resolved discussions
+- 📊 **Severity grouping** - Groups findings by severity (Critical, Major, Minor, Info) in collapsible sections
+- 🔍 **Outside-diff handling** - Separates and groups comments outside the diff range
 
-+-----------------------+                         +-----------------------+
-|     Pull Request      |                         |     Pull Request      |
-+-----------+-----------+                         +-----------+-----------+
-            |                                                 |
-            v                                                 v
-+-----------+-----------+                         +-----------+-----------+
-| Chunking (large PRs)  |                         | Chunking (large PRs)  |
-+-----------+-----------+                         +-----------+-----------+
-            |                                                 |
-            v                                                 v
-+-----------+-----------+                         +-----------+-----------+
-|    Z.ai Chat API      |                         |     Orchestrator      |
-+-----------+-----------+                         +-----------+-----------+
-            |                                         /               \
-            v                                        v                 v
-+-----------+-----------+                +-------------------+ +-----------------------+
-|  Single PR comment    |                |  Security Checks  | | Conversational Feedb. |
-+-----------------------+                +-------------------+ +-----------+-----------+
-                                                                           |
-                                                                           v
-                                                               +-----------+-----------+
-                                                               |  Inline Suggestions   |
-                                                               +-----------+-----------+
-                                                                           |
-                                                                           v
-                                                               +-----------+-----------+
-                                                               |   Feedback Learning   |
-                                                               +-----------+-----------+
-                                                                           |
-                                                                           v
-                                                               +-----------+-----------+
-                                                               | Merge & Post Comment  |
-                                                               +-----------------------+
+</details>
 
-```
+## 📋 Prerequisites
 
-## Quickstart
+- ✅ A **Z.ai account** with API access - [Get your API key](https://platform.z.ai)
+- ✅ A **GitHub repository** with GitHub Actions enabled
 
-Add this to your `.github/workflows/code-review.yml`:
+## 🚀 Quickstart
+
+### Step 1: Create the workflow file
+
+Create `.github/workflows/code-review.yml`:
 
 ```yaml
 name: AI Code Review with Z.ai
@@ -70,6 +53,7 @@ on:
 
 permissions:
   pull-requests: write
+  reviews: write
 
 jobs:
   review:
@@ -77,64 +61,202 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.3
+        uses: bizzkoot/zai-code-review@v0.0.4
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          # Optional - uncomment and set in repo variables if needed
-          # ZAI_MODEL: ${{ vars.ZAI_MODEL }}
-          # ZAI_SYSTEM_PROMPT: ${{ vars.ZAI_SYSTEM_PROMPT }}
-          # ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME }}
+          ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}
+          ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME || 'Z.ai Code Review' }}
+          ZAI_THREAD_SIMILARITY_THRESHOLD: ${{ vars.ZAI_THREAD_SIMILARITY_THRESHOLD || '0.6' }}
+          ZAI_COMMIT_FEEDBACK: ${{ vars.ZAI_COMMIT_FEEDBACK || 'false' }}
 ```
 
-**Note:** All inputs except `ZAI_API_KEY` are optional. If not set, the defaults below are used automatically.
+### Step 2: Add your Z.ai API key
 
-## Inputs
+1. Go to your repository → **Settings** → **Secrets and variables → Actions**
+2. Click **New repository secret**
+3. Add: **Name:** `ZAI_API_KEY`, **Value:** Your key from [platform.z.ai](https://platform.z.ai)
 
-| Input | Required | Default | Description |
-|---|---|---|---|
-| `ZAI_API_KEY` | Yes | — | Your Z.ai API key |
-| `ZAI_MODEL` | No | `glm-4.7` | Z.ai model to use for review |
-| `ZAI_SYSTEM_PROMPT` | No | `You are an expert code reviewer...` | Custom system prompt for the AI reviewer |
-| `ZAI_REVIEWER_NAME` | No | `Z.ai Code Review` | Name shown in the review comment header |
-| `GITHUB_TOKEN` | No | `${{ github.token }}` | GitHub token for API access |
+### Step 3: Push and test!
 
-### Z.ai System Prompt
+Commit the workflow and create a PR. The review appears automatically as a comment.
 
-The default system prompt is:
+## 📖 What You'll See
 
-> You are an expert code reviewer. Review the provided code changes and give clear, actionable feedback.
+### Review Comment Format
 
-You can override it to focus on specific concerns, enforce coding standards, or adjust the review tone, e.g.:
+Findings are grouped by severity in collapsible sections:
 
-> You are a security-focused code reviewer. Identify vulnerabilities, unsafe patterns, and authentication issues. Skip style comments.
+```
+## Z.ai Code Review
 
-## Configuration
+**Actionable comments posted: 3**
 
-To use this action, you must add your Z.ai API key as a GitHub secret.
+<details>
+<summary>🔴 Critical/BLOCKER findings (1)</summary><blockquote>
 
-### 1️⃣ Get your Z.ai API key
+**SQL Injection in query builder**
 
-Generate an API key from your Z.ai dashboard.
+**Problem:** User input is directly concatenated into SQL query.
 
-### 2️⃣ Add the API key to your repository
+**Impact:** Allows attackers to execute arbitrary SQL commands.
 
-1. Go to your GitHub repository  
-2. Click **Settings**  
-3. Navigate to **Secrets and variables → Actions**  
-4. Click **New repository secret** and add:
+**Suggested fix:**
+- const query = `SELECT * FROM users WHERE id = ${userId}`;
++ const query = 'SELECT * FROM users WHERE id = ?';
++ db.query(query, [userId]);
 
-   - **Name:** `ZAI_API_KEY` — **Value:** your Z.ai API key
+</blockquote></details>
 
-## Contributing
+<details>
+<summary>🟠 Major comments (2)</summary><blockquote>
+...
+</blockquote></details>
+```
 
-Contributions are welcome. See the [CONTRIBUTING](CONTRIBUTING.md) file for more information.
+### Inline Suggestions
 
-**For AI assistants**: See [AGENTS.md](AGENTS.md) for project structure, coding conventions, and build commands.
+Actionable code replacements are posted as GitHub review comments:
 
-## Changelog
+```diff
+- console.log(user);
++ console.log({ user });
+```
 
-See [CHANGELOG.md](CHANGELOG.md) for a list of version changes and new features.
+Reviewers can accept/reject suggestions directly in the GitHub UI.
 
-## License
+## 🔒 Security Checks
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for more information.
+Built-in static security checks on all diffs:
+
+| Pattern | Severity | Description |
+|---|---|---|
+| Hardcoded API keys/secrets | Critical | Detects `api_key = "..."` or `secret = "..."` patterns |
+| `eval()` usage | Critical | Flags dangerous dynamic code execution |
+| Hardcoded passwords | Critical | Detects weak or hardcoded passwords |
+| Dangerous functions | Major | Detects exec(), new Function(), child_process require |
+| Disabled lint/security | Minor | Flags eslint-disable, tslint:disable |
+
+## 🧠 Feedback Learning
+
+The action adapts to your codebase over time:
+
+- **Accepted suggestions** → Increases confidence for similar patterns
+- **Rejected suggestions** → Filters out future similar suggestions
+- Stored in `.zai-feedback.json` (optional)
+
+## 🏗️ How It Works
+
+<details>
+<summary>Architecture & Processing Pipeline</summary>
+
+For small to medium PRs, all changes are sent in a single API request. Larger PRs are automatically split into chunks (50K characters each).
+
+**Processing Pipeline:**
+
+1. **Fetch Changed Files** - Retrieves all files in the PR with pagination
+2. **Security Check** - Runs static analysis for hardcoded secrets, eval, dangerous functions
+3. **AI Review** - Sends diff to Z.ai API with conversational feedback prompt
+4. **Post-Processing** - Parses findings, groups by severity, formats with collapsible sections
+5. **Inline Suggestions** - Extracts and posts actionable code suggestions as GitHub review comments
+6. **Threading** - Checks existing threads and replies instead of creating duplicates
+7. **Feedback Learning** - Adapts suggestions based on prior accepted/rejected feedback
+8. **Deduplication** - Filters resolved suggestions and prevents duplicate comments
+
+</details>
+
+## ⚙️ Configuration
+
+<details>
+<summary>🔧 Customization Options</summary>
+
+#### Using Repository Variables (Recommended)
+
+1. Go to repository **Settings** → **Secrets and variables → Actions**
+2. Click **Variables** → **New repository variable**
+3. Add any of:
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `ZAI_MODEL` | `glm-4.7` | AI model to use |
+| `ZAI_REVIEWER_NAME` | `Security Bot` | Name in comment header |
+| `ZAI_THREAD_SIMILARITY_THRESHOLD` | `0.7` | Thread matching strictness (higher = stricter) |
+| `ZAI_COMMIT_FEEDBACK` | `true` | Enable feedback learning commits |
+| `ZAI_SYSTEM_PROMPT` | `You are an expert...` | Custom system prompt |
+
+**Benefits:** Customize without editing workflow, change settings without committing, same workflow across environments.
+
+#### Organization-Level Variables
+
+For multi-repository setups, configure at the organization level to apply settings across all repositories.
+
+</details>
+
+<details>
+<summary>🔬 Advanced Configuration</summary>
+
+#### Thread Similarity Threshold
+
+- **Range:** `0.0` to `1.0`
+- **Default:** `0.6`
+- **Higher values** (e.g., `0.8`): More strict, creates new threads more often
+- **Lower values** (e.g., `0.4`): More permissive, replies to existing threads more often
+
+#### Feedback Learning
+
+- **Default:** `false` (disabled)
+- **Enable:** Set `ZAI_COMMIT_FEEDBACK: 'true'`
+- Stores feedback in `.zai-feedback.json` to adapt future suggestions
+
+#### System Prompt
+
+The default prompt instructs the AI to:
+- Review code changes with clear, actionable feedback
+- Focus on bugs, logic errors, security issues, and meaningful improvements
+- Skip trivial style comments
+- Use severity markers: `[BLOCKER]`, `[CRITICAL]`, `[Major]`, `[Minor]`, `[Info]`
+- Emit inline suggestions: `[[suggestion:path:file:line:...]]`
+
+```yaml
+ZAI_SYSTEM_PROMPT: |
+  You are an expert code reviewer. Focus on security and performance.
+```
+
+</details>
+
+## 🚀 Advanced Usage
+
+<details>
+<summary>Chunking for Large PRs</summary>
+
+Large PRs are automatically split into 50K character chunks:
+
+```
+Chunk 1/3 → Z.ai API → Review part 1
+Chunk 2/3 → Z.ai API → Review part 2  
+Chunk 3/3 → Z.ai API → Review part 3
+                    ↓
+          Combined comment posted to PR
+```
+
+</details>
+
+<details>
+<summary>Deduplication Strategies</summary>
+
+The action prevents duplicate comments through:
+
+1. **Cross-chunk deduplication** - Same file:line:body posted only once
+2. **Content hashing** - Similar suggestions filtered
+3. **Thread detection** - Replies to existing threads instead of creating duplicates
+4. **Resolved filtering** - Skips suggestions where thread is already resolved
+
+</details>
+
+---
+
+## 📄 Other Resources
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [AGENTS.md](AGENTS.md) - Development documentation for AI assistants
+- [CHANGELOG.md](CHANGELOG.md) - Version history
+- [LICENSE](LICENSE) - MIT License

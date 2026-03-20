@@ -20,6 +20,16 @@ const RETRY_CONFIG = {
   maxDelayMs: 8000,
 };
 
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash.toString(36);
+}
+
 async function getChangedFiles(octokit, owner, repo, pullNumber) {
   const files = [];
   let page = 1;
@@ -87,6 +97,7 @@ function buildChunkPrompt(files, chunkIndex, totalChunks) {
 function extractActionableSuggestions(reviews) {
   const suggestions = [];
   const seen = new Set();
+  const contentHashes = new Set();
 
   for (const review of reviews) {
     const content = review.rawReview || '';
@@ -107,12 +118,21 @@ function extractActionableSuggestions(reviews) {
         continue;
       }
 
+      // Deduplicate by file:line:body combination
       const id = `${path}:${line}:${body}`;
+      const contentHash = hashString(`${body}:${suggestion}`.toLowerCase());
+      
       if (seen.has(id)) {
+        continue; // Skip duplicate file:line:body
+      }
+      
+      // Skip if same content was already seen (regardless of line)
+      if (contentHashes.has(contentHash)) {
         continue;
       }
 
       seen.add(id);
+      contentHashes.add(contentHash);
       suggestions.push({
         id,
         path,
@@ -217,6 +237,103 @@ async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt) {
   throw lastError;
 }
 
+async function filterResolvedSuggestions(octokit, owner, repo, pullNumber, suggestions) {
+  try {
+    const { data: comments } = await octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    // Get resolved comment IDs by file:line key
+    const resolvedIds = new Set();
+    for (const comment of comments) {
+      // Check if comment has resolved state
+      if (comment.state === 'RESOLVED' || comment.resolved) {
+        const key = `${comment.path}:${comment.line || comment.original_line}`;
+        resolvedIds.add(key);
+      }
+    }
+
+    // Also check via reviews API for outdated reviews
+    try {
+      await octokit.rest.pulls.listReviews({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      });
+      // Note: APPROVED and CHANGES_REQUESTED reviews don't necessarily mean resolved,
+      // but we can add additional filtering logic here if needed.
+      // For now, we only filter by explicit RESOLVED state.
+    } catch (err) {
+      core.warning(`Could not fetch review state: ${err.message}`);
+    }
+
+    // Filter suggestions to exclude resolved ones
+    return suggestions.filter(s => {
+      const key = `${s.path}:${s.line}`;
+      return !resolvedIds.has(key);
+    });
+  } catch (err) {
+    core.warning(`Could not filter resolved suggestions: ${err.message}`);
+    // Return all suggestions if filtering fails (fail-open)
+    return suggestions;
+  }
+}
+
+function calculateSimilarity(str1, str2) {
+  const words1 = new Set(str1.split(/\s+/).filter(w => w.length > 0));
+  const words2 = new Set(str2.split(/\s+/).filter(w => w.length > 0));
+  const intersection = [...words1].filter(w => words2.has(w));
+  const union = new Set([...words1, ...words2]);
+  return union.size === 0 ? 0 : intersection.length / union.size;
+}
+
+async function getExistingCommentThreads(octokit, owner, repo, pullNumber) {
+  try {
+    const { data: comments } = await octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    const threads = new Map();
+    for (const comment of comments) {
+      const key = `${comment.path}:${comment.line || comment.original_line || 'noline'}`;
+      if (!threads.has(key)) {
+        threads.set(key, []);
+      }
+      threads.get(key).push(comment);
+    }
+    return threads;
+  } catch (err) {
+    core.warning(`Failed to fetch existing threads: ${err.message}`);
+    return new Map();
+  }
+}
+
+function findSimilarThread(threads, suggestion, threshold = 0.6) {
+  const key = `${suggestion.path}:${suggestion.line}`;
+  const existing = threads.get(key);
+
+  if (!existing || existing.length === 0) {
+    return null;
+  }
+
+  for (const comment of existing) {
+    const similarity = calculateSimilarity(
+      suggestion.body.toLowerCase(),
+      comment.body.toLowerCase()
+    );
+    if (similarity > threshold) {
+      return comment;
+    }
+  }
+  return null;
+}
+
 async function run() {
   const apiKey = core.getInput('ZAI_API_KEY', { required: true });
   core.setSecret(apiKey);
@@ -225,6 +342,8 @@ async function run() {
   const reviewerName = core.getInput('ZAI_REVIEWER_NAME');
   const token = core.getInput('GITHUB_TOKEN');
   core.setSecret(token);
+  const threadSimilarityThreshold = parseFloat(core.getInput('ZAI_THREAD_SIMILARITY_THRESHOLD')) || 0.6;
+  const commitFeedback = core.getInput('ZAI_COMMIT_FEEDBACK').toLowerCase() === 'true';
 
   const { context } = github;
   const { owner, repo } = context.repo;
@@ -250,7 +369,14 @@ async function run() {
   }
 
   // --- SecurityCheck integration ---
-  const securityFindings = SecurityCheck.checkSecurity(files);
+  // Load custom patterns from .zai-review.yaml
+  const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
+  const customPatterns = SecurityCheck.loadCustomPatterns(workspaceRoot);
+  if (customPatterns.length > 0) {
+    core.info(`Loaded ${customPatterns.length} custom security pattern(s) from .zai-review.yaml`);
+  }
+
+  const securityFindings = SecurityCheck.checkSecurity(files, customPatterns);
   if (securityFindings.length > 0) {
     core.warning(`Security findings detected: ${securityFindings.length}`);
     for (const finding of securityFindings) {
@@ -290,15 +416,54 @@ async function run() {
     core.warning(`${failedChunks.length} chunk(s) failed out of ${chunks.length}`);
   }
 
-  let combinedReview;
+  // Extract outside-diff comments from each chunk and collect them
+  let allOutsideDiffComments = [];
+  let rawCombinedReview = '';
+
   if (chunks.length > 1) {
-    combinedReview = reviews
-      .map(r => `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.review}`)
-      .join('\n\n---\n\n');
+    for (const r of reviews) {
+      if (r.success) {
+        const separated = ConversationalFeedback.separateOutsideDiffComments(r.rawReview);
+        allOutsideDiffComments.push(...separated.outsideDiffComments);
+        rawCombinedReview += `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.review}\n\n---\n\n`;
+      }
+    }
     core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
   } else {
-    combinedReview = reviews[0].review;
+    if (reviews[0]?.success) {
+      const separated = ConversationalFeedback.separateOutsideDiffComments(reviews[0].rawReview);
+      allOutsideDiffComments.push(...separated.outsideDiffComments);
+      rawCombinedReview = reviews[0].review;
+    } else {
+      rawCombinedReview = reviews[0]?.review || '';
+    }
   }
+
+  // Extract actionable suggestions count for formatting
+  let actionableSuggestions = extractActionableSuggestions(reviews);
+
+  // Adapt and filter suggestions before posting
+  actionableSuggestions = FeedbackLearning.adapt(repoId, actionableSuggestions);
+
+  // Filter out already-resolved suggestions
+  if (actionableSuggestions.length > 0) {
+    actionableSuggestions = await filterResolvedSuggestions(
+      octokit, owner, repo, pullNumber, actionableSuggestions
+    );
+  }
+
+  // Check if there are critical outside-diff comments
+  const hasCriticalOutsideDiff = allOutsideDiffComments.some(c => {
+    const content = c.content?.join('\n') || '';
+    return /\b(critical|blocker)\b/i.test(content);
+  });
+
+  // Format the review with collapsible sections and severity grouping
+  const combinedReview = ConversationalFeedback.formatReview(rawCombinedReview, {
+    actionableCount: actionableSuggestions.length,
+    hasCriticalOutsideDiff,
+    outsideDiffComments: allOutsideDiffComments,
+  });
 
   const body = `## ${reviewerName}\n\n${combinedReview}\n\n${COMMENT_MARKER}`;
 
@@ -328,19 +493,25 @@ async function run() {
   }
 
   // Inline suggestion integration
-  // Extract actionable suggestions from reviews (simple heuristic: look for code suggestion blocks)
-  let actionableSuggestions = extractActionableSuggestions(reviews);
-
-  // Adapt suggestions based on feedback
-  actionableSuggestions = FeedbackLearning.adapt(repoId, actionableSuggestions);
-
   if (actionableSuggestions.length > 0) {
     try {
+      // Fetch existing comment threads for threading support
+      let existingThreads = null;
+      try {
+        existingThreads = await getExistingCommentThreads(octokit, owner, repo, pullNumber);
+      } catch (err) {
+        core.warning(`Could not fetch existing threads: ${err.message}`);
+        existingThreads = new Map();
+      }
+
       const postedSuggestions = await InlineSuggestion.postSuggestions(octokit, {
         owner,
         repo,
         pullNumber,
         suggestions: actionableSuggestions,
+        existingThreads,
+        headSha: context.payload.pull_request?.head?.sha,
+        threadSimilarityThreshold,
       });
 
       if (postedSuggestions > 0) {
@@ -354,6 +525,25 @@ async function run() {
   // Listen for user feedback (accept/reject) via review events (pseudo-code, to be implemented in webhook or future extension)
   // Example usage:
   // FeedbackLearning.learnFromFeedback(repoId, suggestionId, accepted);
+
+  // Persist .zai-feedback.json to PR branch if enabled
+  if (commitFeedback) {
+    const feedbackFile = '.zai-feedback.json';
+    const fs = require('fs');
+    if (fs.existsSync(feedbackFile)) {
+      const execSync = require('child_process').execSync;
+      try {
+        execSync('git config --local user.email "github-actions[bot]@users.noreply.github.com"');
+        execSync('git config --local user.name "github-actions[bot]"');
+        execSync(`git add ${feedbackFile}`);
+        execSync(`git commit -m "chore: update feedback learning for PR #${pullNumber}" || true`);
+        execSync('git push');
+        core.info('.zai-feedback.json committed and pushed to PR branch.');
+      } catch (err) {
+        core.warning(`Failed to commit/push .zai-feedback.json: ${err.message}`);
+      }
+    }
+  }
 }
 
 if (require.main === module) {
@@ -364,7 +554,12 @@ module.exports = {
   splitIntoChunks,
   buildChunkPrompt,
   extractActionableSuggestions,
+  filterResolvedSuggestions,
+  calculateSimilarity,
+  getExistingCommentThreads,
+  findSimilarThread,
   callZaiApi,
   callZaiApiWithRetry,
+  hashString,
   RETRY_CONFIG,
 };

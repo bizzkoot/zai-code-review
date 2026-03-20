@@ -2,6 +2,7 @@ const {
   splitIntoChunks,
   buildChunkPrompt,
   extractActionableSuggestions,
+  hashString,
   RETRY_CONFIG,
 } = require('../src/index');
 
@@ -75,6 +76,39 @@ describe('RETRY_CONFIG', () => {
   });
 });
 
+describe('hashString', () => {
+  test('produces consistent hash for same input', () => {
+    const input = 'use const:const value = 1;';
+    const hash1 = hashString(input);
+    const hash2 = hashString(input);
+    expect(hash1).toBe(hash2);
+  });
+
+  test('produces different hashes for different inputs', () => {
+    const hash1 = hashString('use const:const value = 1;');
+    const hash2 = hashString('use let:let value = 1;');
+    expect(hash1).not.toBe(hash2);
+  });
+
+  test('handles empty string', () => {
+    const hash = hashString('');
+    expect(hash).toBeDefined();
+    expect(typeof hash).toBe('string');
+  });
+
+  test('handles special characters', () => {
+    const hash1 = hashString('const x = "hello";');
+    const hash2 = hashString('const x = "hello";');
+    expect(hash1).toBe(hash2);
+  });
+
+  test('is case-sensitive by default', () => {
+    const hash1 = hashString('UPPERCASE');
+    const hash2 = hashString('uppercase');
+    expect(hash1).not.toBe(hash2);
+  });
+});
+
 describe('extractActionableSuggestions', () => {
   test('extracts valid unique suggestion markers from raw reviews', () => {
     const reviews = [
@@ -107,5 +141,130 @@ describe('extractActionableSuggestions', () => {
     ];
 
     expect(extractActionableSuggestions(reviews)).toEqual([]);
+  });
+
+  test('deduplicates by file:line:body combination', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Add semicolon:value;]]\n[[suggestion:path:src/file.js:line:5:Add semicolon:value;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toEqual({
+      id: 'src/file.js:5:Add semicolon',
+      path: 'src/file.js',
+      line: 5,
+      side: 'RIGHT',
+      body: 'Add semicolon',
+      suggestion: 'value;',
+    });
+  });
+
+  test('deduplicates across multiple review chunks', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Use const:const x = 1;]]',
+      },
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Use const:const x = 1;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
+  });
+
+  test('deduplicates same content on different lines', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Remove var:const x = 1;]]\n[[suggestion:path:src/file.js:line:10:Remove var:const x = 1;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].line).toBe(5);
+  });
+
+  test('deduplicates with case-insensitive content matching', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Fix:Use CONST;]]\n[[suggestion:path:src/file.js:line:10:Fix:use const;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
+  });
+
+  test('keeps suggestions with different body text on same file/line', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Add semicolon:value;]]\n[[suggestion:path:src/file.js:line:5:Remove spaces:value;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(2);
+    expect(suggestions[0].body).toBe('Add semicolon');
+    expect(suggestions[1].body).toBe('Remove spaces');
+  });
+
+  test('deduplicates same content on different lines and files', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/a.js:line:5:Use const:const x = 1;]]\n[[suggestion:path:src/b.js:line:5:Use const:const x = 1;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].path).toBe('src/a.js');
+  });
+
+  test('handles suggestions with colons in suggestion part', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Add comment:// TODO: fix this later]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0].suggestion).toBe('// TODO: fix this later');
+  });
+
+  test('handles mixed valid and invalid suggestions', () => {
+    const reviews = [
+      {
+        rawReview: [
+          '[[suggestion:path:src/valid.js:line:5:Fix:const x = 1;]]',
+          '[[suggestion:invalid-format]]',
+          '[[suggestion:path:src/valid.js:line:10:Improve:let y = 2;]]',
+        ].join('\n'),
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(2);
+  });
+
+  test('deduplicates across mix of valid and invalid chunks', () => {
+    const reviews = [
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:5:Fix:use const;]]',
+      },
+      {
+        rawReview: '[[invalid-suggestion]]',
+      },
+      {
+        rawReview: '[[suggestion:path:src/file.js:line:10:Fix:use const;]]',
+      },
+    ];
+
+    const suggestions = extractActionableSuggestions(reviews);
+    expect(suggestions).toHaveLength(1);
   });
 });

@@ -1,0 +1,48 @@
+# Z.ai Code Review - Custom Security Patterns Configuration
+# 
+# This file allows you to define custom security patterns for static analysis.
+# Place this file at the root of your repository as `.zai-review.yaml`.
+#
+# The action will automatically load these patterns and merge them with
+# the built-in security checks.
+
+security_patterns:
+  # Example: Detect console.log statements (debugging code)
+  - pattern: 'console\.(log|warn|error|info|debug)\s*\('
+    message: 'Debug logging statement detected. Consider removing before production.'
+    severity: low
+
+  # Example: Detect weak crypto (MD5, SHA1)
+  - pattern: '\b(md5|sha1)\s*\('
+    message: 'Weak cryptographic hash function detected. Use SHA-256 or stronger.'
+    severity: high
+
+  # Example: Detect SQL injection risk
+  - pattern: 'execute\s*\(\s*["\'].*%s.*["\']'
+    message: 'Potential SQL injection vulnerability. Use parameterized queries.'
+    severity: critical
+
+  # Example: Detect insecure random number generation
+  - pattern: '\bMath\.random\s*\('
+    message: 'Math.random() is not cryptographically secure. Use crypto.randomBytes() for security-sensitive operations.'
+    severity: medium
+
+  # Example: Detect hardcoded URLs with credentials
+  - pattern: '(https?|ftp)://[^:]+:[^@]+@'
+    message: 'URL contains hardcoded credentials. Use environment variables or secrets management.'
+    severity: high
+
+  # Example: Detect disabled TLS verification
+  - pattern: 'rejectUnauthorized\s*:\s*false'
+    message: 'TLS certificate verification is disabled. This is insecure.'
+    severity: critical
+
+  # Example: Detect innerHTML usage (XSS risk)
+  - pattern: '\.innerHTML\s*='
+    message: 'innerHTML assignment detected. This can lead to XSS vulnerabilities. Use textContent or sanitize input.'
+    severity: medium
+
+  # Example: Detect eval-like functions in Python
+  - pattern: '\b(exec|eval)\s*\('
+    message: 'Dynamic code execution detected. This is a security risk.'
+    severity: high

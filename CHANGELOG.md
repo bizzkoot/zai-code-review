@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] - 2026-03-20
+
+### Added
+- Enhanced review formatting with Coderabbit-style collapsible severity sections
+  - `formatReview()` groups findings by severity (Critical, Major, Minor, Info)
+  - Collapsible `<details>` sections for cleaner PR comments
+  - Actionable comment count in review header
+- Outside-diff comment separation and grouping
+  - `separateOutsideDiffComments()` identifies comments outside diff range
+  - Grouped by file in collapsible section
+- Smart deduplication (cross-chunk)
+  - `hashString()` for content-based deduplication
+  - Prevents duplicate suggestions across PR review chunks
+  - File:line:body deduplication logic
+- Comment threading support
+  - `getExistingCommentThreads()` fetches existing review threads
+  - `findSimilarThread()` with configurable similarity threshold (0.6)
+  - `calculateSimilarity()` for thread matching
+- Custom security patterns system
+  - `loadCustomPatterns()` reads `.zai-review.yaml` config file
+  - Simple YAML parser for `security_patterns` section
+  - `categorizeSeverity()` maps patterns to severity levels
+  - Custom patterns merged with built-in checks
+  - Example config file: `.zai-review.yaml.example`
+- Configurable thread similarity threshold
+  - New input: `ZAI_THREAD_SIMILARITY_THRESHOLD` (default: 0.6)
+  - Allows tuning of thread matching sensitivity
+- Outside-diff separation
+  - `separateOutsideDiffComments()` identifies outside-diff markers
+  - `formatOutsideDiffSection()` creates grouped collapsible sections
+  - Groups comments by file for organization
+  - Preserves full comment content
+- Resolved comment filtering
+  - `filterResolvedSuggestions()` prevents reposting resolved issues
+  - Checks `comment.state === 'RESOLVED'`
+  - Builds file:line key set of resolved IDs
+  - Graceful fallback if API call fails
+- Improved system prompt with format instructions
+  - Instructs AI to use severity markers
+  - Requests (outside diff) marking for appropriate comments
+  - Clear structured output guidance
+- Comprehensive integration test suite
+  - Tests for custom patterns loading and YAML parsing
+  - Threading integration tests with similarity matching
+  - Suggestion deduplication across chunks
+  - Resolved comment filtering
+  - Security check integration with custom patterns
+
+### Fixed
+- **Wired up dead code**: `formatReview()` and `separateOutsideDiffComments()` are now called in the main flow
+- Resolved comment filtering now properly integrated before posting suggestions
+- CHANGELOG v0.0.1 section: removed duplicate entries
+
+### Changed
+- Security patterns refactored into configurable system
+  - Built-in patterns extracted to `getBuiltInPatterns()` method
+  - `checkSecurity()` now accepts optional custom patterns array
+  - Invalid regex patterns in custom config are silently skipped
+
 ## [0.0.3] - 2026-03-19
 
 ### Added
@@ -36,17 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ESLint configuration for code style enforcement
 - CI workflow (`.github/workflows/ci.yml`) for automated lint, test, and build
 - `AGENTS.md` for AI coding assistants and project contributors
-  - `MAX_CHUNK_SIZE` constant (50K characters per chunk)
-  - `splitIntoChunks()` function to divide files by diff size
-  - `buildChunkPrompt()` for chunk-aware prompts with progress tracking
-  - Partial chunk error handling with graceful degradation
-- `AGENTS.md` for AI coding assistants and project contributors
 - Comprehensive error logging for multi-chunk processing
-- Retry logic with exponential backoff for transient failure handling
-- Comprehensive test suite with Jest (8 tests covering core functionality)
-- ESLint configuration for code style enforcement
-- CI workflow (`.github/workflows/ci.yml`) for automated lint, test, and build
-- `AGENTS.md` for AI coding assistants and project contributors
 
 ### Changed
 - **CRITICAL**: Error messages no longer expose API response data (security hardening)

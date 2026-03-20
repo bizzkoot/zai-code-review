@@ -29948,6 +29948,16 @@ const RETRY_CONFIG = {
   maxDelayMs: 8000,
 };
 
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash.toString(36);
+}
+
 async function getChangedFiles(octokit, owner, repo, pullNumber) {
   const files = [];
   let page = 1;
@@ -30015,6 +30025,7 @@ function buildChunkPrompt(files, chunkIndex, totalChunks) {
 function extractActionableSuggestions(reviews) {
   const suggestions = [];
   const seen = new Set();
+  const contentHashes = new Set();
 
   for (const review of reviews) {
     const content = review.rawReview || '';
@@ -30035,12 +30046,21 @@ function extractActionableSuggestions(reviews) {
         continue;
       }
 
+      // Deduplicate by file:line:body combination
       const id = `${path}:${line}:${body}`;
+      const contentHash = hashString(`${body}:${suggestion}`.toLowerCase());
+      
       if (seen.has(id)) {
+        continue; // Skip duplicate file:line:body
+      }
+      
+      // Skip if same content was already seen (regardless of line)
+      if (contentHashes.has(contentHash)) {
         continue;
       }
 
       seen.add(id);
+      contentHashes.add(contentHash);
       suggestions.push({
         id,
         path,
@@ -30145,6 +30165,103 @@ async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt) {
   throw lastError;
 }
 
+async function filterResolvedSuggestions(octokit, owner, repo, pullNumber, suggestions) {
+  try {
+    const { data: comments } = await octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    // Get resolved comment IDs by file:line key
+    const resolvedIds = new Set();
+    for (const comment of comments) {
+      // Check if comment has resolved state
+      if (comment.state === 'RESOLVED' || comment.resolved) {
+        const key = `${comment.path}:${comment.line || comment.original_line}`;
+        resolvedIds.add(key);
+      }
+    }
+
+    // Also check via reviews API for outdated reviews
+    try {
+      await octokit.rest.pulls.listReviews({
+        owner,
+        repo,
+        pull_number: pullNumber,
+      });
+      // Note: APPROVED and CHANGES_REQUESTED reviews don't necessarily mean resolved,
+      // but we can add additional filtering logic here if needed.
+      // For now, we only filter by explicit RESOLVED state.
+    } catch (err) {
+      core.warning(`Could not fetch review state: ${err.message}`);
+    }
+
+    // Filter suggestions to exclude resolved ones
+    return suggestions.filter(s => {
+      const key = `${s.path}:${s.line}`;
+      return !resolvedIds.has(key);
+    });
+  } catch (err) {
+    core.warning(`Could not filter resolved suggestions: ${err.message}`);
+    // Return all suggestions if filtering fails (fail-open)
+    return suggestions;
+  }
+}
+
+function calculateSimilarity(str1, str2) {
+  const words1 = new Set(str1.split(/\s+/).filter(w => w.length > 0));
+  const words2 = new Set(str2.split(/\s+/).filter(w => w.length > 0));
+  const intersection = [...words1].filter(w => words2.has(w));
+  const union = new Set([...words1, ...words2]);
+  return union.size === 0 ? 0 : intersection.length / union.size;
+}
+
+async function getExistingCommentThreads(octokit, owner, repo, pullNumber) {
+  try {
+    const { data: comments } = await octokit.rest.pulls.listReviewComments({
+      owner,
+      repo,
+      pull_number: pullNumber,
+      per_page: 100,
+    });
+
+    const threads = new Map();
+    for (const comment of comments) {
+      const key = `${comment.path}:${comment.line || comment.original_line || 'noline'}`;
+      if (!threads.has(key)) {
+        threads.set(key, []);
+      }
+      threads.get(key).push(comment);
+    }
+    return threads;
+  } catch (err) {
+    core.warning(`Failed to fetch existing threads: ${err.message}`);
+    return new Map();
+  }
+}
+
+function findSimilarThread(threads, suggestion, threshold = 0.6) {
+  const key = `${suggestion.path}:${suggestion.line}`;
+  const existing = threads.get(key);
+
+  if (!existing || existing.length === 0) {
+    return null;
+  }
+
+  for (const comment of existing) {
+    const similarity = calculateSimilarity(
+      suggestion.body.toLowerCase(),
+      comment.body.toLowerCase()
+    );
+    if (similarity > threshold) {
+      return comment;
+    }
+  }
+  return null;
+}
+
 async function run() {
   const apiKey = core.getInput('ZAI_API_KEY', { required: true });
   core.setSecret(apiKey);
@@ -30153,6 +30270,8 @@ async function run() {
   const reviewerName = core.getInput('ZAI_REVIEWER_NAME');
   const token = core.getInput('GITHUB_TOKEN');
   core.setSecret(token);
+  const threadSimilarityThreshold = parseFloat(core.getInput('ZAI_THREAD_SIMILARITY_THRESHOLD')) || 0.6;
+  const commitFeedback = core.getInput('ZAI_COMMIT_FEEDBACK').toLowerCase() === 'true';
 
   const { context } = github;
   const { owner, repo } = context.repo;
@@ -30178,7 +30297,14 @@ async function run() {
   }
 
   // --- SecurityCheck integration ---
-  const securityFindings = SecurityCheck.checkSecurity(files);
+  // Load custom patterns from .zai-review.yaml
+  const workspaceRoot = process.env.GITHUB_WORKSPACE || process.cwd();
+  const customPatterns = SecurityCheck.loadCustomPatterns(workspaceRoot);
+  if (customPatterns.length > 0) {
+    core.info(`Loaded ${customPatterns.length} custom security pattern(s) from .zai-review.yaml`);
+  }
+
+  const securityFindings = SecurityCheck.checkSecurity(files, customPatterns);
   if (securityFindings.length > 0) {
     core.warning(`Security findings detected: ${securityFindings.length}`);
     for (const finding of securityFindings) {
@@ -30218,15 +30344,54 @@ async function run() {
     core.warning(`${failedChunks.length} chunk(s) failed out of ${chunks.length}`);
   }
 
-  let combinedReview;
+  // Extract outside-diff comments from each chunk and collect them
+  let allOutsideDiffComments = [];
+  let rawCombinedReview = '';
+
   if (chunks.length > 1) {
-    combinedReview = reviews
-      .map(r => `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.review}`)
-      .join('\n\n---\n\n');
+    for (const r of reviews) {
+      if (r.success) {
+        const separated = ConversationalFeedback.separateOutsideDiffComments(r.rawReview);
+        allOutsideDiffComments.push(...separated.outsideDiffComments);
+        rawCombinedReview += `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.review}\n\n---\n\n`;
+      }
+    }
     core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
   } else {
-    combinedReview = reviews[0].review;
+    if (reviews[0]?.success) {
+      const separated = ConversationalFeedback.separateOutsideDiffComments(reviews[0].rawReview);
+      allOutsideDiffComments.push(...separated.outsideDiffComments);
+      rawCombinedReview = reviews[0].review;
+    } else {
+      rawCombinedReview = reviews[0]?.review || '';
+    }
   }
+
+  // Extract actionable suggestions count for formatting
+  let actionableSuggestions = extractActionableSuggestions(reviews);
+
+  // Adapt and filter suggestions before posting
+  actionableSuggestions = FeedbackLearning.adapt(repoId, actionableSuggestions);
+
+  // Filter out already-resolved suggestions
+  if (actionableSuggestions.length > 0) {
+    actionableSuggestions = await filterResolvedSuggestions(
+      octokit, owner, repo, pullNumber, actionableSuggestions
+    );
+  }
+
+  // Check if there are critical outside-diff comments
+  const hasCriticalOutsideDiff = allOutsideDiffComments.some(c => {
+    const content = c.content?.join('\n') || '';
+    return /\b(critical|blocker)\b/i.test(content);
+  });
+
+  // Format the review with collapsible sections and severity grouping
+  const combinedReview = ConversationalFeedback.formatReview(rawCombinedReview, {
+    actionableCount: actionableSuggestions.length,
+    hasCriticalOutsideDiff,
+    outsideDiffComments: allOutsideDiffComments,
+  });
 
   const body = `## ${reviewerName}\n\n${combinedReview}\n\n${COMMENT_MARKER}`;
 
@@ -30256,19 +30421,25 @@ async function run() {
   }
 
   // Inline suggestion integration
-  // Extract actionable suggestions from reviews (simple heuristic: look for code suggestion blocks)
-  let actionableSuggestions = extractActionableSuggestions(reviews);
-
-  // Adapt suggestions based on feedback
-  actionableSuggestions = FeedbackLearning.adapt(repoId, actionableSuggestions);
-
   if (actionableSuggestions.length > 0) {
     try {
+      // Fetch existing comment threads for threading support
+      let existingThreads = null;
+      try {
+        existingThreads = await getExistingCommentThreads(octokit, owner, repo, pullNumber);
+      } catch (err) {
+        core.warning(`Could not fetch existing threads: ${err.message}`);
+        existingThreads = new Map();
+      }
+
       const postedSuggestions = await InlineSuggestion.postSuggestions(octokit, {
         owner,
         repo,
         pullNumber,
         suggestions: actionableSuggestions,
+        existingThreads,
+        headSha: context.payload.pull_request?.head?.sha,
+        threadSimilarityThreshold,
       });
 
       if (postedSuggestions > 0) {
@@ -30282,6 +30453,25 @@ async function run() {
   // Listen for user feedback (accept/reject) via review events (pseudo-code, to be implemented in webhook or future extension)
   // Example usage:
   // FeedbackLearning.learnFromFeedback(repoId, suggestionId, accepted);
+
+  // Persist .zai-feedback.json to PR branch if enabled
+  if (commitFeedback) {
+    const feedbackFile = '.zai-feedback.json';
+    const fs = __nccwpck_require__(7147);
+    if (fs.existsSync(feedbackFile)) {
+      const execSync = (__nccwpck_require__(2081).execSync);
+      try {
+        execSync('git config --local user.email "github-actions[bot]@users.noreply.github.com"');
+        execSync('git config --local user.name "github-actions[bot]"');
+        execSync(`git add ${feedbackFile}`);
+        execSync(`git commit -m "chore: update feedback learning for PR #${pullNumber}" || true`);
+        execSync('git push');
+        core.info('.zai-feedback.json committed and pushed to PR branch.');
+      } catch (err) {
+        core.warning(`Failed to commit/push .zai-feedback.json: ${err.message}`);
+      }
+    }
+  }
 }
 
 if (__nccwpck_require__.c[__nccwpck_require__.s] === module) {
@@ -30292,8 +30482,13 @@ module.exports = {
   splitIntoChunks,
   buildChunkPrompt,
   extractActionableSuggestions,
+  filterResolvedSuggestions,
+  calculateSimilarity,
+  getExistingCommentThreads,
+  findSimilarThread,
   callZaiApi,
   callZaiApiWithRetry,
+  hashString,
   RETRY_CONFIG,
 };
 
@@ -30305,6 +30500,158 @@ module.exports = {
 
 // Handles conversational feedback logic for code review
 class ConversationalFeedback {
+  /**
+   * Parses raw review text and extracts findings with severity and details
+   * @param {string} rawReview - Raw review text
+   * @returns {Array} Array of finding objects with severity, title, problem, impact, fix, prompt
+   * @private
+   */
+  static parseFindings(rawReview) {
+    if (!rawReview || typeof rawReview !== 'string') {
+      return [];
+    }
+
+    const findings = [];
+    const lines = rawReview.split('\n');
+    let current = null;
+    let currentSection = null;
+
+    for (const line of lines) {
+      // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
+      const severityMatch = line.match(/^#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
+      if (severityMatch) {
+        if (current) {
+          findings.push(current);
+        }
+        const severity = severityMatch[1].toUpperCase();
+        const location = severityMatch[2];
+        const title = severityMatch[3] || location;
+        const isOutsideDiff = location.includes('(outside diff)');
+
+        current = {
+          severity: normalizeSeverity(severity),
+          location,
+          title: title.replace(/\s*\(outside diff\)\s*/gi, '').trim(),
+          isOutsideDiff,
+          problem: '',
+          impact: '',
+          fix: '',
+          prompt: ''
+        };
+        currentSection = null;
+        continue;
+      }
+
+      if (!current) continue;
+
+      // Match section headers within a finding
+      if (line.match(/^\*{2}Problem:\*{2}/i)) {
+        currentSection = 'problem';
+        continue;
+      }
+      if (line.match(/^\*{2}Impact:\*{2}/i)) {
+        currentSection = 'impact';
+        continue;
+      }
+      if (line.match(/^\*{2}Suggested fix:\*{2}/i)) {
+        currentSection = 'fix';
+        continue;
+      }
+      if (line.match(/^\*{2}Prompt for AI Agents:\*{2}/i)) {
+        currentSection = 'prompt';
+        continue;
+      }
+
+      // Append to current section
+      if (currentSection) {
+        if (current[currentSection]) {
+          current[currentSection] += '\n' + line;
+        } else {
+          current[currentSection] = line;
+        }
+      }
+    }
+
+    if (current) {
+      findings.push(current);
+    }
+
+    return findings.map(f => ({
+      ...f,
+      problem: f.problem.trim(),
+      impact: f.impact.trim(),
+      fix: f.fix.trim(),
+      prompt: f.prompt.trim()
+    }));
+  }
+
+  /**
+   * Groups findings by severity level
+   * @param {Array} findings - Array of finding objects
+   * @returns {Object} Object with critical, major, minor arrays
+   * @private
+   */
+  static groupBySeverity(findings) {
+    const grouped = {
+      critical: [],
+      major: [],
+      minor: [],
+      info: []
+    };
+
+    for (const finding of findings) {
+      switch (finding.severity) {
+      case 'critical':
+      case 'blocker':
+        grouped.critical.push(finding);
+        break;
+      case 'major':
+        grouped.major.push(finding);
+        break;
+      case 'minor':
+        grouped.minor.push(finding);
+        break;
+      case 'info':
+      default:
+        grouped.info.push(finding);
+      }
+    }
+
+    return grouped;
+  }
+
+  /**
+   * Formats a single finding with all its details
+   * @param {Object} finding - Finding object with severity, title, problem, impact, fix, prompt
+   * @returns {string} Formatted finding in markdown
+   * @private
+   */
+  static formatFinding(finding) {
+    let output = `**${finding.title}**`;
+
+    if (finding.isOutsideDiff) {
+      output = `**(outside diff) ${finding.title}**`;
+    }
+
+    if (finding.problem) {
+      output += `\n**Problem:** ${finding.problem}`;
+    }
+
+    if (finding.impact) {
+      output += `\n**Impact:** ${finding.impact}`;
+    }
+
+    if (finding.fix) {
+      output += `\n**Suggested fix:**\n${finding.fix}`;
+    }
+
+    if (finding.prompt) {
+      output += `\n**Prompt for AI Agents:**\n${finding.prompt}`;
+    }
+
+    return output;
+  }
+
   /**
    * Builds a context-aware, developer-friendly review prompt for Z.ai
    * @param {Array} files - PR files (with patch, filename, status)
@@ -30328,11 +30675,34 @@ class ConversationalFeedback {
       '',
     ].join(' ');
 
+    // Add format instructions
+    const formatInstructions = `
+Format each finding as follows:
+
+## [SEVERITY] File:Line - Brief Title
+**Problem:** Description of the issue
+**Impact:** Why this matters
+**Suggested fix:**
+\`\`\`diff
+- bad code
++ good code
+\`\`\`
+**Prompt for AI Agents:**
+\`\`\`
+Specific instructions for AI verification and fix.
+\`\`\`
+
+Group findings by severity: BLOCKER > CRITICAL > Major > Minor > Info.
+Mark findings outside the diff with "(outside diff)" before the title.
+`.trim();
+
+    prompt += '\n\n' + formatInstructions;
+
     if (totalChunks > 1) {
-      prompt += `\n[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus only on this section.]\n`;
+      prompt += `\n\n[This is part ${chunkIndex + 1} of ${totalChunks} in a large code review. Focus only on this section.]\n`;
     }
 
-    prompt += '\n' + diffs;
+    prompt += '\n\n' + diffs;
     return prompt;
   }
 
@@ -30355,6 +30725,168 @@ class ConversationalFeedback {
     }
     return result;
   }
+
+  /**
+   * Separates outside-diff comments from inline comments based on "(outside diff)" markers
+   * @param {string} rawReview - Raw review text from the AI
+   * @returns {Object} Object with inlineComments and outsideDiffComments
+   */
+  static separateOutsideDiffComments(rawReview) {
+    if (!rawReview || typeof rawReview !== 'string') {
+      return { inlineComments: '', outsideDiffComments: [] };
+    }
+
+    const inlineComments = [];
+    const outsideDiffComments = [];
+
+    const lines = rawReview.split('\n');
+    let currentSection = 'inline';
+    let currentFinding = null;
+
+    for (const line of lines) {
+      const isOutsideMarker = line.includes('(outside diff)') || line.includes('(outside the diff)');
+
+      if (isOutsideMarker) {
+        if (currentSection === 'inline') {
+          currentSection = 'outside';
+        }
+        if (currentFinding) {
+          outsideDiffComments.push(currentFinding);
+        }
+        currentFinding = { line, content: [line] };
+      } else if (line.match(/^#{1,3}\s+\[/) && currentSection === 'outside') {
+        if (currentFinding && currentFinding.content.length > 0) {
+          outsideDiffComments.push(currentFinding);
+        }
+        currentFinding = { line, content: [line] };
+      } else if (currentSection === 'inline') {
+        inlineComments.push(line);
+      } else if (currentFinding) {
+        currentFinding.content.push(line);
+      }
+    }
+
+    if (currentFinding && currentFinding.content.length > 0 && currentSection === 'outside') {
+      if (!outsideDiffComments.find(f => f.line === currentFinding.line)) {
+        outsideDiffComments.push(currentFinding);
+      }
+    }
+
+    return { inlineComments: inlineComments.join('\n'), outsideDiffComments };
+  }
+
+  /**
+   * Formats outside-diff comments into a collapsible section grouped by file
+   * @param {Array} outsideDiffComments - Array of outside-diff comment objects
+   * @returns {string} Formatted markdown section or empty string if no comments
+   */
+  static formatOutsideDiffSection(outsideDiffComments) {
+    if (!outsideDiffComments || outsideDiffComments.length === 0) {
+      return '';
+    }
+
+    let output = `\n<details>\n<summary>⚠️ Outside diff range comments (${outsideDiffComments.length})</summary><blockquote>\n\n`;
+
+    const byFile = {};
+    for (const comment of outsideDiffComments) {
+      const content = comment.content.join('\n');
+      const fileMatch = content.match(/`([^`]+)`/);
+      let file = fileMatch ? fileMatch[1] : 'General';
+      // Extract just the filename without line number (e.g., "src/foo.js:5" -> "src/foo.js")
+      file = file.split(':')[0];
+      if (!byFile[file]) byFile[file] = [];
+      byFile[file].push(comment);
+    }
+
+    for (const [file, comments] of Object.entries(byFile)) {
+      output += `<details>\n<summary>${file} (${comments.length})</summary><blockquote>\n\n`;
+      for (const comment of comments) {
+        output += comment.content.join('\n') + '\n\n';
+      }
+      output += '</blockquote></details>\n\n';
+    }
+
+    output += '</blockquote></details>\n';
+    return output;
+  }
+
+  /**
+   * Formats raw review text into a structured markdown output with collapsible sections
+   * @param {string} rawReview - Raw review text from the AI
+   * @param {Object} options - Formatting options
+   * @param {number} options.actionableCount - Number of actionable comments posted inline
+   * @param {boolean} options.hasCriticalOutsideDiff - Whether critical comments exist outside diff
+   * @param {Array} options.outsideDiffComments - Array of outside-diff comment objects
+   * @returns {string} Formatted review with collapsible sections grouped by severity
+   */
+  static formatReview(rawReview, options = {}) {
+    const {
+      actionableCount = 0,
+      hasCriticalOutsideDiff = false,
+      outsideDiffComments = []
+    } = options;
+
+    let output = `**Actionable comments posted: ${actionableCount}**\n\n`;
+
+    if (actionableCount > 0) {
+      output += '> [!NOTE]\n> Due to the large number of review comments, Critical severity comments were prioritized as inline comments.\n\n';
+    }
+
+    if (hasCriticalOutsideDiff) {
+      output += '> [!CAUTION]\n> Some comments are outside the diff and can\'t be posted inline due to platform limitations.\n\n';
+    }
+
+    // Parse and group findings by severity
+    const findings = ConversationalFeedback.parseFindings(rawReview);
+    const grouped = ConversationalFeedback.groupBySeverity(findings);
+
+    // Add critical section
+    if (grouped.critical.length > 0) {
+      output += `<details>\n<summary>🔴 Critical/BLOCKER findings (${grouped.critical.length})</summary><blockquote>\n\n`;
+      output += grouped.critical.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add major section
+    if (grouped.major.length > 0) {
+      output += `<details>\n<summary>🟠 Major comments (${grouped.major.length})</summary><blockquote>\n\n`;
+      output += grouped.major.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add minor section
+    if (grouped.minor.length > 0) {
+      output += `<details>\n<summary>🟡 Minor comments (${grouped.minor.length})</summary><blockquote>\n\n`;
+      output += grouped.minor.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add info section
+    if (grouped.info.length > 0) {
+      output += `<details>\n<summary>ℹ️ Info comments (${grouped.info.length})</summary><blockquote>\n\n`;
+      output += grouped.info.map(f => ConversationalFeedback.formatFinding(f)).join('\n\n');
+      output += '\n\n</blockquote></details>\n\n';
+    }
+
+    // Add outside-diff section
+    const outsideDiffSection = ConversationalFeedback.formatOutsideDiffSection(outsideDiffComments);
+    if (outsideDiffSection) {
+      output += outsideDiffSection;
+    }
+
+    return output.trim();
+  }
+}
+
+// Normalizes severity labels to a standard format
+function normalizeSeverity(severity) {
+  const normalized = severity.toUpperCase();
+  if (normalized === 'BLOCKER') return 'critical';
+  if (normalized === 'CRITICAL') return 'critical';
+  if (normalized === 'MAJOR') return 'major';
+  if (normalized === 'MINOR') return 'minor';
+  if (normalized === 'INFO') return 'info';
+  return 'info';
 }
 
 module.exports = ConversationalFeedback;
@@ -30438,16 +30970,19 @@ module.exports = FeedbackLearning;
 /***/ }),
 
 /***/ 4333:
-/***/ ((module) => {
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 // Handles inline suggestion logic for code review
+
+const { findSimilarThread } = __nccwpck_require__(4351);
+
 class InlineSuggestion {
   static buildComments(suggestions) {
     return (suggestions || [])
       .filter(s => s.suggestion && Number.isInteger(s.line) && s.line > 0)
       .map(s => ({
         path: s.path,
-        body: `${s.body}\n\u0060\u0060\u0060suggestion\n${s.suggestion}\n\u0060\u0060\u0060`,
+        body: `${s.body}\n\`\`\`suggestion\n${s.suggestion}\n\`\`\``,
         line: s.line,
         side: s.side || 'RIGHT',
       }));
@@ -30465,14 +31000,80 @@ class InlineSuggestion {
    *   repo: repo name
    *   pullNumber: PR number
    *   suggestions: Array<{ path, body, line, side, suggestion }>
+   *   existingThreads: optional Map of existing comment threads for threading support
+   *   headSha: optional commit SHA for new comments
+   *   threadSimilarityThreshold: optional similarity threshold for thread matching (default: 0.6)
    */
-  static async postSuggestions(octokit, { owner, repo, pullNumber, suggestions }) {
+  static async postSuggestions(octokit, { owner, repo, pullNumber, suggestions, existingThreads = null, headSha = null, threadSimilarityThreshold = 0.6 }) {
     const comments = InlineSuggestion.buildComments(suggestions);
 
     if (comments.length === 0) {
       return 0;
     }
 
+    // If existingThreads provided, skip bulk post and go straight to individual with threading
+    if (existingThreads && existingThreads.size > 0) {
+      // Post individually with threading support
+      let postedCount = 0;
+      for (const comment of comments) {
+        try {
+          const key = `${comment.path}:${comment.line}`;
+          const existing = existingThreads.get(key);
+          let existingComment = null;
+
+          if (existing && existing.length > 0) {
+            // Use similarity matching to find the best thread
+            const suggestionObj = {
+              path: comment.path,
+              line: comment.line,
+              body: comment.body.replace(/\n```suggestion[\s\S]*$/, ''),
+            };
+            existingComment = findSimilarThread(existingThreads, suggestionObj, threadSimilarityThreshold);
+          }
+
+          if (existingComment && headSha) {
+            // Reply to existing thread
+            try {
+              await octokit.rest.pulls.createReplyForReviewComment({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                comment_id: existingComment.id,
+                body: `Additional context: ${comment.body}`,
+              });
+              postedCount++;
+            } catch (replyErr) {
+              // Fall back to new comment if reply fails
+              await octokit.rest.pulls.createReview({
+                owner,
+                repo,
+                pull_number: pullNumber,
+                event: 'COMMENT',
+                comments: [comment],
+              });
+              postedCount++;
+            }
+          } else {
+            // Post as new comment
+            await octokit.rest.pulls.createReview({
+              owner,
+              repo,
+              pull_number: pullNumber,
+              event: 'COMMENT',
+              comments: [comment],
+            });
+            postedCount++;
+          }
+        } catch (err) {
+          if (!InlineSuggestion.isValidationError(err)) {
+            throw err;
+          }
+        }
+      }
+      return postedCount;
+    }
+
+    // Try bulk post first (for performance when no threading)
     try {
       await octokit.rest.pulls.createReview({
         owner,
@@ -30481,7 +31082,6 @@ class InlineSuggestion {
         event: 'COMMENT',
         comments,
       });
-
       return comments.length;
     } catch (err) {
       if (comments.length === 1 || !InlineSuggestion.isValidationError(err)) {
@@ -30489,6 +31089,7 @@ class InlineSuggestion {
       }
     }
 
+    // Fall back to individual posting
     let postedCount = 0;
     for (const comment of comments) {
       try {
@@ -30517,20 +31118,145 @@ module.exports = InlineSuggestion;
 /***/ }),
 
 /***/ 7443:
-/***/ ((module) => {
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-// Handles security check logic for code review (stub for future extension)
+const fs = __nccwpck_require__(7147);
+const path = __nccwpck_require__(1017);
 
 // Handles security check logic for code review
 class SecurityCheck {
   /**
+   * Loads custom security patterns from .zai-review.yaml configuration file
+   * @param {string} workspaceRoot - Root directory to search for config file
+   * @returns {Array} Array of custom pattern objects: { pattern, message, severity }
+   */
+  static loadCustomPatterns(workspaceRoot) {
+    const configPath = path.join(workspaceRoot, '.zai-review.yaml');
+    
+    if (!fs.existsSync(configPath)) {
+      return [];
+    }
+
+    try {
+      const configContent = fs.readFileSync(configPath, 'utf8');
+      const patterns = SecurityCheck.parseYamlSecurityPatterns(configContent);
+      return patterns || [];
+    } catch (err) {
+      // Fail silently if config file cannot be read or parsed
+      // This ensures the action continues with built-in patterns only
+      return [];
+    }
+  }
+
+  /**
+   * Simple YAML parser for security_patterns section
+   * @param {string} yamlContent - Raw YAML content
+   * @returns {Array|null} Parsed patterns array or null if not found
+   * @private
+   */
+  static parseYamlSecurityPatterns(yamlContent) {
+    if (!yamlContent || typeof yamlContent !== 'string') {
+      return null;
+    }
+
+    const lines = yamlContent.split('\n');
+    const patterns = [];
+    let inSecurityPatterns = false;
+    let currentItem = null;
+
+    for (const line of lines) {
+      // Check for security_patterns section
+      if (/^security_patterns:\s*$/.test(line.trim())) {
+        inSecurityPatterns = true;
+        continue;
+      }
+
+      if (!inSecurityPatterns) continue;
+
+      // Check for end of section (new top-level key)
+      if (/^[a-z_]+:\s*$/.test(line.trim()) && !line.startsWith(' ')) {
+        if (currentItem) {
+          patterns.push(currentItem);
+          currentItem = null;
+        }
+        inSecurityPatterns = false;
+        continue;
+      }
+
+      // Parse list item start (- pattern: ...)
+      const patternMatch = line.match(/^\s*-\s*pattern:\s*(.+?)\s*$/);
+      if (patternMatch) {
+        if (currentItem) {
+          patterns.push(currentItem);
+        }
+        currentItem = {
+          pattern: patternMatch[1].replace(/^['"]|['"]$/g, ''),
+          message: '',
+          severity: 'medium',
+        };
+        continue;
+      }
+
+      // Parse message field
+      const messageMatch = line.match(/^\s*message:\s*(.+?)\s*$/);
+      if (messageMatch && currentItem) {
+        currentItem.message = messageMatch[1].replace(/^['"]|['"]$/g, '');
+        continue;
+      }
+
+      // Parse severity field
+      const severityMatch = line.match(/^\s*severity:\s*(.+?)\s*$/);
+      if (severityMatch && currentItem) {
+        currentItem.severity = SecurityCheck.categorizeSeverity(severityMatch[1]);
+        continue;
+      }
+    }
+
+    // Don't forget the last item
+    if (currentItem) {
+      patterns.push(currentItem);
+    }
+
+    return patterns.length > 0 ? patterns : null;
+  }
+
+  /**
+   * Maps severity labels to standard severity levels
+   * @param {string} severity - Raw severity string from config
+   * @returns {string} Normalized severity: 'high', 'medium', or 'low'
+   * @private
+   */
+  static categorizeSeverity(severity) {
+    if (!severity) return 'medium';
+    
+    const normalized = severity.toLowerCase().trim();
+    
+    // Map various severity labels to standard levels
+    if (['critical', 'blocker', 'high', 'error'].includes(normalized)) {
+      return 'high';
+    }
+    if (['major', 'medium', 'warning', 'warn'].includes(normalized)) {
+      return 'medium';
+    }
+    if (['minor', 'low', 'info', 'information'].includes(normalized)) {
+      return 'low';
+    }
+    
+    return 'medium';
+  }
+
+  /**
    * Runs static analysis and best-practice checks on diffs
    * @param {Array} files - PR files (with patch, filename, status)
+   * @param {Array} customPatterns - Optional array of custom pattern objects
    * @returns {Array} Array of security findings: { path, line, message, severity }
    */
-  static checkSecurity(files) {
+  static checkSecurity(files, customPatterns = []) {
     const findings = [];
     if (!Array.isArray(files)) return findings;
+
+    // Combine built-in and custom patterns
+    const allPatterns = [...SecurityCheck.getBuiltInPatterns(), ...customPatterns];
 
     for (const file of files) {
       if (!file.patch || !file.filename) continue;
@@ -30542,60 +31268,69 @@ class SecurityCheck {
         if (!line.startsWith('+') || line.startsWith('+++')) continue;
         const code = line.slice(1);
 
-        // Simple static checks (expand as needed)
-        // 1. Hardcoded secrets
-        if (/(['"]?api[_-]?key['"]?\s*[:=]\s*['"][A-Za-z0-9\-_]{16,}['"]|['"]?secret['"]?\s*[:=]\s*['"][A-Za-z0-9\-_]{8,}['"])/i.test(code)) {
-          findings.push({
-            path: file.filename,
-            line: lineNum,
-            message: 'Possible hardcoded secret or API key.',
-            severity: 'high',
-          });
+        // Check against all patterns
+        for (const patternConfig of allPatterns) {
+          try {
+            const regex = new RegExp(patternConfig.pattern, 'i');
+            if (regex.test(code)) {
+              findings.push({
+                path: file.filename,
+                line: lineNum,
+                message: patternConfig.message,
+                severity: patternConfig.severity,
+              });
+              // Only report first matching pattern per line
+              break;
+            }
+          } catch (regexErr) {
+            // Skip invalid regex patterns silently
+          }
         }
-        // 2. Insecure eval usage
-        if (/\beval\s*\(/.test(code)) {
-          findings.push({
-            path: file.filename,
-            line: lineNum,
-            message: 'Use of eval() detected. This is unsafe and should be avoided.',
-            severity: 'high',
-          });
-        }
-        // 3. Insecure regex for password
-        if (/password\s*[:=]\s*['"][^'"]{0,7}['"]/.test(code)) {
-          findings.push({
-            path: file.filename,
-            line: lineNum,
-            message: 'Possible weak or hardcoded password.',
-            severity: 'high',
-          });
-        }
-        // 4. Disabled lint/security checks
-        if (/eslint-disable|tslint:disable|security-disable/i.test(code)) {
-          findings.push({
-            path: file.filename,
-            line: lineNum,
-            message: 'Lint or security checks disabled in code.',
-            severity: 'medium',
-          });
-        }
-        // 5. Dangerous function usage (exec, Function)
-        if (/\b(require\(['"]child_process['"]\)|exec\s*\(|new Function\s*\()/i.test(code)) {
-          findings.push({
-            path: file.filename,
-            line: lineNum,
-            message: 'Dangerous function usage (exec, Function constructor, child_process).',
-            severity: 'high',
-          });
-        }
-        // 6. TODO: Add more rules as needed
       }
     }
     return findings;
   }
+
+  /**
+   * Returns built-in security patterns
+   * @returns {Array} Array of built-in pattern objects
+   * @private
+   */
+  static getBuiltInPatterns() {
+    return [
+      {
+        pattern: '([\'"]?api[_-]?key[\'"]?\\s*[:=]\\s*[\'"][A-Za-z0-9\\-_]{16,}[\'"]|[\'"]?secret[\'"]?\\s*[:=]\\s*[\'"][A-Za-z0-9\\-_]{8,}[\'"])',
+        message: 'Possible hardcoded secret or API key.',
+        severity: 'high',
+      },
+      {
+        pattern: '\\beval\\s*\\(',
+        message: 'Use of eval() detected. This is unsafe and should be avoided.',
+        severity: 'high',
+      },
+      {
+        pattern: 'password\\s*[:=]\\s*[\'"][^\'"]{0,7}[\'"]',
+        message: 'Possible weak or hardcoded password.',
+        severity: 'high',
+      },
+      {
+        pattern: 'eslint-disable|tslint:disable|security-disable',
+        message: 'Lint or security checks disabled in code.',
+        severity: 'medium',
+      },
+      {
+        pattern: '\\b(require\\([\'"]child_process[\'"]\\)|exec\\s*\\(|new Function\\s*\\()',
+        message: 'Dangerous function usage (exec, Function constructor, child_process).',
+        severity: 'high',
+      },
+    ];
+  }
 }
 
 module.exports = SecurityCheck;
+module.exports.loadCustomPatterns = SecurityCheck.loadCustomPatterns;
+module.exports.parseYamlSecurityPatterns = SecurityCheck.parseYamlSecurityPatterns;
+module.exports.categorizeSeverity = SecurityCheck.categorizeSeverity;
 
 
 /***/ }),
