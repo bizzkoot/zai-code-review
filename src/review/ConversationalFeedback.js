@@ -18,7 +18,7 @@ class ConversationalFeedback {
 
     for (const line of lines) {
       // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
-      const severityMatch = line.match(/^#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
+      const severityMatch = line.match(/^(?:[•*-]\s*)?#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
       if (severityMatch) {
         if (current) {
           findings.push(current);

@@ -105,6 +105,30 @@ describe('ConversationalFeedback', () => {
       expect(ConversationalFeedback.parseFindings('')).toEqual([]);
       expect(ConversationalFeedback.parseFindings(undefined)).toEqual([]);
     });
+
+    it('parses severity headers from combined chunk output with bullet-prefixed headings', () => {
+      const rawReview = [
+        '### Chunk 1/2',
+        '',
+        '• ## [CRITICAL] src/a.js:10 - First critical issue',
+        '**Problem:** First problem',
+        '',
+        '---',
+        '',
+        '### Chunk 2/2',
+        '',
+        '• ## [MAJOR] src/b.js:20 - Second major issue',
+        '**Problem:** Second problem',
+      ].join('\n');
+
+      const findings = ConversationalFeedback.parseFindings(rawReview);
+
+      expect(findings).toHaveLength(2);
+      expect(findings[0].severity).toBe('critical');
+      expect(findings[0].title).toBe('First critical issue');
+      expect(findings[1].severity).toBe('major');
+      expect(findings[1].title).toBe('Second major issue');
+    });
   });
 
   describe('groupBySeverity', () => {

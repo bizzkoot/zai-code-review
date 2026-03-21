@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] - 2026-03-21
+
+### Fixed
+- Multi-chunk review summaries now preserve severity grouping across all chunks
+  - Combined summary parsing now uses raw chunk output instead of post-processed text
+  - Severity parsing now tolerates bullet-prefixed headings from chunk formatting
+- Inline suggestion threading now replies to an existing thread at most once per run
+  - Additional findings at the same file and line are posted as separate review comments
+  - Prevents unrelated inline suggestions from nesting under the first matching thread
+
 ## [0.0.4] - 2026-03-20
 
 ### Added

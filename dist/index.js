@@ -30075,6 +30075,35 @@ function extractActionableSuggestions(reviews) {
   return suggestions;
 }
 
+function formatSecurityFindingsForReview(findings) {
+  if (!Array.isArray(findings) || findings.length === 0) {
+    return '';
+  }
+
+  return findings.map(finding => {
+    const severity = mapSecuritySeverityToReviewSeverity(finding.severity);
+    const location = `${finding.path}:${finding.line}`;
+    return [
+      `## [${severity}] ${location} - ${finding.message}`,
+      `**Problem:** ${finding.message}`,
+      '**Impact:** Security-sensitive code was added in this diff and should be reviewed carefully.',
+    ].join('\n');
+  }).join('\n\n');
+}
+
+function mapSecuritySeverityToReviewSeverity(severity) {
+  switch ((severity || '').toLowerCase()) {
+  case 'high':
+    return 'CRITICAL';
+  case 'medium':
+    return 'MAJOR';
+  case 'low':
+    return 'INFO';
+  default:
+    return 'INFO';
+  }
+}
+
 function callZaiApi(apiKey, model, systemPrompt, prompt) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
@@ -30326,13 +30355,15 @@ async function run() {
       const review = ConversationalFeedback.postProcess(rawReview);
       // Prepend actionable security findings for this chunk
       const chunkFindings = SecurityCheck.checkSecurity(chunks[i]);
+      const securityReview = formatSecurityFindingsForReview(chunkFindings);
+      const summaryReview = securityReview ? `${securityReview}\n\n${rawReview}` : rawReview;
       let reviewWithSecurity = review;
       if (chunkFindings.length > 0) {
         const secHeader = '#### Security Findings (static analysis)\n';
         const secList = chunkFindings.map(f => `- [${f.severity}] ${f.path}:${f.line} - ${f.message}`).join('\n');
         reviewWithSecurity = `${secHeader}${secList}\n\n${review}`;
       }
-      reviews.push({ index: i, rawReview, review: reviewWithSecurity, success: true });
+      reviews.push({ index: i, rawReview, summaryReview, review: reviewWithSecurity, success: true });
     } catch (err) {
       core.warning(`Chunk ${i + 1}/${chunks.length} failed: ${err.message}`);
       failedChunks.push({ index: i, error: err.message });
@@ -30353,7 +30384,7 @@ async function run() {
       if (r.success) {
         const separated = ConversationalFeedback.separateOutsideDiffComments(r.rawReview);
         allOutsideDiffComments.push(...separated.outsideDiffComments);
-        rawCombinedReview += `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.review}\n\n---\n\n`;
+        rawCombinedReview += `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.summaryReview}\n\n---\n\n`;
       }
     }
     core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
@@ -30361,7 +30392,7 @@ async function run() {
     if (reviews[0]?.success) {
       const separated = ConversationalFeedback.separateOutsideDiffComments(reviews[0].rawReview);
       allOutsideDiffComments.push(...separated.outsideDiffComments);
-      rawCombinedReview = reviews[0].review;
+      rawCombinedReview = reviews[0].summaryReview;
     } else {
       rawCombinedReview = reviews[0]?.review || '';
     }
@@ -30482,6 +30513,7 @@ module.exports = {
   splitIntoChunks,
   buildChunkPrompt,
   extractActionableSuggestions,
+  formatSecurityFindingsForReview,
   filterResolvedSuggestions,
   calculateSimilarity,
   getExistingCommentThreads,
@@ -30518,7 +30550,7 @@ class ConversationalFeedback {
 
     for (const line of lines) {
       // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
-      const severityMatch = line.match(/^#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
+      const severityMatch = line.match(/^(?:[•*-]\s*)?#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
       if (severityMatch) {
         if (current) {
           findings.push(current);
@@ -31015,6 +31047,7 @@ class InlineSuggestion {
     if (existingThreads && existingThreads.size > 0) {
       // Post individually with threading support
       let postedCount = 0;
+      const repliedCommentIds = new Set();
       for (const comment of comments) {
         try {
           const key = `${comment.path}:${comment.line}`;
@@ -31029,6 +31062,9 @@ class InlineSuggestion {
               body: comment.body.replace(/\n```suggestion[\s\S]*$/, ''),
             };
             existingComment = findSimilarThread(existingThreads, suggestionObj, threadSimilarityThreshold);
+            if (existingComment && repliedCommentIds.has(existingComment.id)) {
+              existingComment = null;
+            }
           }
 
           if (existingComment && headSha) {
@@ -31041,6 +31077,7 @@ class InlineSuggestion {
                 comment_id: existingComment.id,
                 body: `Additional context: ${comment.body}`,
               });
+              repliedCommentIds.add(existingComment.id);
               postedCount++;
             } catch (replyErr) {
               // Fall back to new comment if reply fails

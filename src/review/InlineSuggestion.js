@@ -41,6 +41,7 @@ class InlineSuggestion {
     if (existingThreads && existingThreads.size > 0) {
       // Post individually with threading support
       let postedCount = 0;
+      const repliedCommentIds = new Set();
       for (const comment of comments) {
         try {
           const key = `${comment.path}:${comment.line}`;
@@ -55,6 +56,9 @@ class InlineSuggestion {
               body: comment.body.replace(/\n```suggestion[\s\S]*$/, ''),
             };
             existingComment = findSimilarThread(existingThreads, suggestionObj, threadSimilarityThreshold);
+            if (existingComment && repliedCommentIds.has(existingComment.id)) {
+              existingComment = null;
+            }
           }
 
           if (existingComment && headSha) {
@@ -67,6 +71,7 @@ class InlineSuggestion {
                 comment_id: existingComment.id,
                 body: `Additional context: ${comment.body}`,
               });
+              repliedCommentIds.add(existingComment.id);
               postedCount++;
             } catch (replyErr) {
               // Fall back to new comment if reply fails

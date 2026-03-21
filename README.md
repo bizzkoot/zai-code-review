@@ -2,14 +2,14 @@
 
 AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comments, bug detection, improvement suggestions, security checks, and feedback learning via GitHub Actions.
 
-**Latest version: v0.0.4**
+**Latest version: v0.0.5**
 
-## ✨ What's New in v0.0.4
+## ✨ What's New in v0.0.5
 
-- 🔒 **Static security checks** - Automatically detects hardcoded secrets, dangerous functions, and security vulnerabilities
-- 🧠 **Feedback learning** - Adapts suggestions based on your team's accepted/rejected feedback
-- 🧵 **Threaded comments** - Smart deduplication that replies to existing threads instead of creating duplicates
-- 📊 **Severity grouping** - Findings organized by severity (Critical, Major, Minor, Info) in collapsible sections
+- 📊 **Fixed multi-chunk severity grouping** - Chunked reviews now stay in Critical, Major, Minor, and Info instead of collapsing into Info after the first chunk
+- 💬 **Fixed inline comment threading** - Separate findings no longer pile into the first matching inline thread
+- 🧵 **Safer thread reuse** - Replies are now reserved for actual follow-up on the same finding within an existing thread
+- 🧾 **Updated release notes** - Added a reference doc for the corrected v0.0.4 reply behavior
 
 ## 🎯 Features
 
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.4
+        uses: bizzkoot/zai-code-review@v0.0.5
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}

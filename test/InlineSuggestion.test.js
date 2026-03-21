@@ -5,6 +5,7 @@ const mockOctokit = {
   rest: {
     pulls: {
       createReview: jest.fn(),
+      createReplyForReviewComment: jest.fn(),
     },
   },
 };
@@ -12,6 +13,7 @@ const mockOctokit = {
 describe('InlineSuggestion', () => {
   beforeEach(() => {
     mockOctokit.rest.pulls.createReview.mockClear();
+    mockOctokit.rest.pulls.createReplyForReviewComment.mockClear();
   });
 
   describe('postSuggestions', () => {
@@ -142,6 +144,66 @@ describe('InlineSuggestion', () => {
             path: 'bar.js',
             body: 'Use let\n```suggestion\nlet y = 2;\n```',
             line: 4,
+            side: 'RIGHT',
+          },
+        ],
+      });
+    });
+
+    it('replies to a matching existing thread only once per batch', async () => {
+      const suggestions = [
+        {
+          path: 'foo.js',
+          body: 'Use const instead of var',
+          line: 10,
+          side: 'RIGHT',
+          suggestion: 'const value = 1;',
+        },
+        {
+          path: 'foo.js',
+          body: 'Use const instead of var declaration',
+          line: 10,
+          side: 'RIGHT',
+          suggestion: 'const count = 2;',
+        },
+      ];
+
+      const existingThreads = new Map([
+        ['foo.js:10', [{ id: 99, body: 'Use const instead of var' }]],
+      ]);
+
+      mockOctokit.rest.pulls.createReplyForReviewComment.mockResolvedValue({});
+      mockOctokit.rest.pulls.createReview.mockResolvedValue({});
+
+      const posted = await InlineSuggestion.postSuggestions(mockOctokit, {
+        owner: 'test',
+        repo: 'repo',
+        pullNumber: 1,
+        suggestions,
+        existingThreads,
+        headSha: 'abc123',
+      });
+
+      expect(posted).toBe(2);
+      expect(mockOctokit.rest.pulls.createReplyForReviewComment).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.pulls.createReplyForReviewComment).toHaveBeenCalledWith({
+        owner: 'test',
+        repo: 'repo',
+        pull_number: 1,
+        comment_id: 99,
+        body: 'Additional context: Use const instead of var\n```suggestion\nconst value = 1;\n```',
+      });
+      expect(mockOctokit.rest.pulls.createReview).toHaveBeenCalledTimes(1);
+      expect(mockOctokit.rest.pulls.createReview).toHaveBeenCalledWith({
+        owner: 'test',
+        repo: 'repo',
+        pull_number: 1,
+        event: 'COMMENT',
+        comments: [
+          {
+            path: 'foo.js',
+            body: 'Use const instead of var declaration\n```suggestion\nconst count = 2;\n```',
+            line: 10,
             side: 'RIGHT',
           },
         ],

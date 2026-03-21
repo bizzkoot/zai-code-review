@@ -2,9 +2,12 @@ const {
   splitIntoChunks,
   buildChunkPrompt,
   extractActionableSuggestions,
+  formatSecurityFindingsForReview,
   hashString,
   RETRY_CONFIG,
 } = require('../src/index');
+
+const ConversationalFeedback = require('../src/review/ConversationalFeedback');
 
 describe('splitIntoChunks', () => {
   test('returns empty array for files without patches', () => {
@@ -266,5 +269,31 @@ describe('extractActionableSuggestions', () => {
 
     const suggestions = extractActionableSuggestions(reviews);
     expect(suggestions).toHaveLength(1);
+  });
+});
+
+describe('formatSecurityFindingsForReview', () => {
+  test('formats static security findings as severity-tagged review entries', () => {
+    const securityReview = formatSecurityFindingsForReview([
+      {
+        path: 'src/auth.js',
+        line: 14,
+        severity: 'high',
+        message: 'Possible hardcoded secret or API key.',
+      },
+      {
+        path: 'src/auth.js',
+        line: 21,
+        severity: 'medium',
+        message: 'Lint or security checks disabled in code.',
+      },
+    ]);
+
+    expect(securityReview).toContain('## [CRITICAL] src/auth.js:14 - Possible hardcoded secret or API key.');
+    expect(securityReview).toContain('## [MAJOR] src/auth.js:21 - Lint or security checks disabled in code.');
+
+    const formatted = ConversationalFeedback.formatReview(securityReview);
+    expect(formatted).toContain('🔴 Critical/BLOCKER findings (1)');
+    expect(formatted).toContain('🟠 Major comments (1)');
   });
 });
