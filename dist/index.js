@@ -29988,6 +29988,17 @@ function splitIntoChunks(files) {
   for (const file of filesWithPatches) {
     const fileSize = file.patch.length;
 
+    // Mark files that exceed chunk size individually
+    if (fileSize > MAX_CHUNK_SIZE) {
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk);
+        currentChunk = [];
+        currentSize = 0;
+      }
+      chunks.push([{ ...file, oversized: true }]);
+      continue;
+    }
+
     if (currentSize + fileSize > MAX_CHUNK_SIZE && currentChunk.length > 0) {
       chunks.push(currentChunk);
       currentChunk = [];
@@ -30098,7 +30109,7 @@ function mapSecuritySeverityToReviewSeverity(severity) {
   case 'medium':
     return 'MAJOR';
   case 'low':
-    return 'INFO';
+    return 'MINOR';
   default:
     return 'INFO';
   }
@@ -30196,12 +30207,20 @@ async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt) {
 
 async function filterResolvedSuggestions(octokit, owner, repo, pullNumber, suggestions) {
   try {
-    const { data: comments } = await octokit.rest.pulls.listReviewComments({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      per_page: 100,
-    });
+    const comments = [];
+    let page = 1;
+    while (true) {
+      const { data } = await octokit.rest.pulls.listReviewComments({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        per_page: PER_PAGE,
+        page,
+      });
+      comments.push(...data);
+      if (data.length < PER_PAGE) break;
+      page++;
+    }
 
     // Get resolved comment IDs by file:line key
     const resolvedIds = new Set();
@@ -30299,7 +30318,10 @@ async function run() {
   const reviewerName = core.getInput('ZAI_REVIEWER_NAME');
   const token = core.getInput('GITHUB_TOKEN');
   core.setSecret(token);
-  const threadSimilarityThreshold = parseFloat(core.getInput('ZAI_THREAD_SIMILARITY_THRESHOLD')) || 0.6;
+  let threadSimilarityThreshold = parseFloat(core.getInput('ZAI_THREAD_SIMILARITY_THRESHOLD'));
+  if (isNaN(threadSimilarityThreshold) || threadSimilarityThreshold < 0 || threadSimilarityThreshold > 1) {
+    threadSimilarityThreshold = 0.6;
+  }
   const commitFeedback = core.getInput('ZAI_COMMIT_FEEDBACK').toLowerCase() === 'true';
 
   const { context } = github;
@@ -30309,6 +30331,11 @@ async function run() {
   if (!pullNumber) {
     core.setFailed('This action only runs on pull_request events.');
     return;
+  }
+
+  const headSha = context.payload.pull_request?.head?.sha;
+  if (!headSha) {
+    core.warning('Missing pull request head SHA. Inline suggestions may not work correctly.');
   }
 
   const octokit = github.getOctokit(token);
@@ -30349,6 +30376,12 @@ async function run() {
 
   for (let i = 0; i < chunks.length; i++) {
     try {
+      const oversizedFiles = chunks[i].filter(f => f.oversized);
+      if (oversizedFiles.length > 0) {
+        for (const f of oversizedFiles) {
+          core.warning(`File ${f.filename} exceeds chunk size limit (${f.patch.length} bytes). Review may be incomplete.`);
+        }
+      }
       core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
       const prompt = ConversationalFeedback.buildPrompt(chunks[i], i, chunks.length);
       const rawReview = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
@@ -30373,6 +30406,10 @@ async function run() {
 
   if (failedChunks.length > 0) {
     core.warning(`${failedChunks.length} chunk(s) failed out of ${chunks.length}`);
+    if (failedChunks.length === chunks.length) {
+      core.setFailed('All review chunks failed. No review could be generated.');
+      return;
+    }
   }
 
   // Extract outside-diff comments from each chunk and collect them
@@ -30384,7 +30421,7 @@ async function run() {
       if (r.success) {
         const separated = ConversationalFeedback.separateOutsideDiffComments(r.rawReview);
         allOutsideDiffComments.push(...separated.outsideDiffComments);
-        rawCombinedReview += `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.summaryReview}\n\n---\n\n`;
+        rawCombinedReview += r.summaryReview + '\n\n';
       }
     }
     core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
@@ -30549,6 +30586,16 @@ class ConversationalFeedback {
     let currentSection = null;
 
     for (const line of lines) {
+      // Skip chunk boundary markers (structural separators between combined chunks)
+      if (line.match(/^#{2,}\s+Chunk\s+\d+\/\d+/) || line === '---' || line === '• --') {
+        if (current) {
+          findings.push(current);
+          current = null;
+          currentSection = null;
+        }
+        continue;
+      }
+
       // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
       const severityMatch = line.match(/^(?:[•*-]\s*)?#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
       if (severityMatch) {
@@ -30576,21 +30623,29 @@ class ConversationalFeedback {
 
       if (!current) continue;
 
-      // Match section headers within a finding
-      if (line.match(/^\*{2}Problem:\*{2}/i)) {
+      // Match section headers within a finding and capture inline content
+      const problemMatch = line.match(/^\*{2}Problem:\*{2}\s*(.*)/i);
+      if (problemMatch) {
         currentSection = 'problem';
+        if (problemMatch[1]) current.problem = problemMatch[1];
         continue;
       }
-      if (line.match(/^\*{2}Impact:\*{2}/i)) {
+      const impactMatch = line.match(/^\*{2}Impact:\*{2}\s*(.*)/i);
+      if (impactMatch) {
         currentSection = 'impact';
+        if (impactMatch[1]) current.impact = impactMatch[1];
         continue;
       }
-      if (line.match(/^\*{2}Suggested fix:\*{2}/i)) {
+      const fixMatch = line.match(/^\*{2}Suggested fix:\*{2}\s*(.*)/i);
+      if (fixMatch) {
         currentSection = 'fix';
+        if (fixMatch[1]) current.fix = fixMatch[1];
         continue;
       }
-      if (line.match(/^\*{2}Prompt for AI Agents:\*{2}/i)) {
+      const promptMatch = line.match(/^\*{2}Prompt for AI Agents:\*{2}\s*(.*)/i);
+      if (promptMatch) {
         currentSection = 'prompt';
+        if (promptMatch[1]) current.prompt = promptMatch[1];
         continue;
       }
 
@@ -31300,7 +31355,18 @@ class SecurityCheck {
       const lines = file.patch.split('\n');
       let lineNum = 0;
       for (const line of lines) {
-        lineNum++;
+        // Parse diff hunk headers to get actual file line numbers
+        const hunkMatch = line.match(/^@@\s+-\d+(?:,\d+)?\s+\+(\d+)/);
+        if (hunkMatch) {
+          lineNum = parseInt(hunkMatch[1], 10) - 1;
+          continue;
+        }
+
+        // Track line numbers for context and added lines (not removed)
+        if (!line.startsWith('-')) {
+          lineNum++;
+        }
+
         // Only analyze added lines
         if (!line.startsWith('+') || line.startsWith('+++')) continue;
         const code = line.slice(1);

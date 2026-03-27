@@ -60,6 +60,17 @@ function splitIntoChunks(files) {
   for (const file of filesWithPatches) {
     const fileSize = file.patch.length;
 
+    // Mark files that exceed chunk size individually
+    if (fileSize > MAX_CHUNK_SIZE) {
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk);
+        currentChunk = [];
+        currentSize = 0;
+      }
+      chunks.push([{ ...file, oversized: true }]);
+      continue;
+    }
+
     if (currentSize + fileSize > MAX_CHUNK_SIZE && currentChunk.length > 0) {
       chunks.push(currentChunk);
       currentChunk = [];
@@ -170,7 +181,7 @@ function mapSecuritySeverityToReviewSeverity(severity) {
   case 'medium':
     return 'MAJOR';
   case 'low':
-    return 'INFO';
+    return 'MINOR';
   default:
     return 'INFO';
   }
@@ -268,12 +279,20 @@ async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt) {
 
 async function filterResolvedSuggestions(octokit, owner, repo, pullNumber, suggestions) {
   try {
-    const { data: comments } = await octokit.rest.pulls.listReviewComments({
-      owner,
-      repo,
-      pull_number: pullNumber,
-      per_page: 100,
-    });
+    const comments = [];
+    let page = 1;
+    while (true) {
+      const { data } = await octokit.rest.pulls.listReviewComments({
+        owner,
+        repo,
+        pull_number: pullNumber,
+        per_page: PER_PAGE,
+        page,
+      });
+      comments.push(...data);
+      if (data.length < PER_PAGE) break;
+      page++;
+    }
 
     // Get resolved comment IDs by file:line key
     const resolvedIds = new Set();
@@ -371,7 +390,10 @@ async function run() {
   const reviewerName = core.getInput('ZAI_REVIEWER_NAME');
   const token = core.getInput('GITHUB_TOKEN');
   core.setSecret(token);
-  const threadSimilarityThreshold = parseFloat(core.getInput('ZAI_THREAD_SIMILARITY_THRESHOLD')) || 0.6;
+  let threadSimilarityThreshold = parseFloat(core.getInput('ZAI_THREAD_SIMILARITY_THRESHOLD'));
+  if (isNaN(threadSimilarityThreshold) || threadSimilarityThreshold < 0 || threadSimilarityThreshold > 1) {
+    threadSimilarityThreshold = 0.6;
+  }
   const commitFeedback = core.getInput('ZAI_COMMIT_FEEDBACK').toLowerCase() === 'true';
 
   const { context } = github;
@@ -381,6 +403,11 @@ async function run() {
   if (!pullNumber) {
     core.setFailed('This action only runs on pull_request events.');
     return;
+  }
+
+  const headSha = context.payload.pull_request?.head?.sha;
+  if (!headSha) {
+    core.warning('Missing pull request head SHA. Inline suggestions may not work correctly.');
   }
 
   const octokit = github.getOctokit(token);
@@ -421,6 +448,12 @@ async function run() {
 
   for (let i = 0; i < chunks.length; i++) {
     try {
+      const oversizedFiles = chunks[i].filter(f => f.oversized);
+      if (oversizedFiles.length > 0) {
+        for (const f of oversizedFiles) {
+          core.warning(`File ${f.filename} exceeds chunk size limit (${f.patch.length} bytes). Review may be incomplete.`);
+        }
+      }
       core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
       const prompt = ConversationalFeedback.buildPrompt(chunks[i], i, chunks.length);
       const rawReview = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
@@ -445,6 +478,10 @@ async function run() {
 
   if (failedChunks.length > 0) {
     core.warning(`${failedChunks.length} chunk(s) failed out of ${chunks.length}`);
+    if (failedChunks.length === chunks.length) {
+      core.setFailed('All review chunks failed. No review could be generated.');
+      return;
+    }
   }
 
   // Extract outside-diff comments from each chunk and collect them
@@ -456,7 +493,7 @@ async function run() {
       if (r.success) {
         const separated = ConversationalFeedback.separateOutsideDiffComments(r.rawReview);
         allOutsideDiffComments.push(...separated.outsideDiffComments);
-        rawCombinedReview += `### Chunk ${r.index + 1}/${chunks.length}\n\n${r.summaryReview}\n\n---\n\n`;
+        rawCombinedReview += r.summaryReview + '\n\n';
       }
     }
     core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);

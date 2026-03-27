@@ -141,7 +141,18 @@ class SecurityCheck {
       const lines = file.patch.split('\n');
       let lineNum = 0;
       for (const line of lines) {
-        lineNum++;
+        // Parse diff hunk headers to get actual file line numbers
+        const hunkMatch = line.match(/^@@\s+-\d+(?:,\d+)?\s+\+(\d+)/);
+        if (hunkMatch) {
+          lineNum = parseInt(hunkMatch[1], 10) - 1;
+          continue;
+        }
+
+        // Track line numbers for context and added lines (not removed)
+        if (!line.startsWith('-')) {
+          lineNum++;
+        }
+
         // Only analyze added lines
         if (!line.startsWith('+') || line.startsWith('+++')) continue;
         const code = line.slice(1);

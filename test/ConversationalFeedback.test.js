@@ -129,6 +129,111 @@ describe('ConversationalFeedback', () => {
       expect(findings[1].severity).toBe('major');
       expect(findings[1].title).toBe('Second major issue');
     });
+
+    it('does not leak chunk headers or separators into finding content', () => {
+      const rawReview = [
+        '### Chunk 1/3',
+        '',
+        '## [CRITICAL] src/a.js:10 - Null Reference Risk',
+        '**Problem:** Missing null check',
+        '**Impact:** Runtime crash',
+        '**Suggested fix:**',
+        '```diff',
+        '- const best = entries[0];',
+        '+ if (!best) return null;',
+        '```',
+        '',
+        '---',
+        '',
+        '### Chunk 2/3',
+        '',
+        '## [MAJOR] src/b.js:20 - Unsafe Parsing',
+        '**Problem:** Port not validated',
+        '**Impact:** Invalid port accepted',
+        '',
+        '---',
+        '',
+        '### Chunk 3/3',
+        '',
+        '## [MINOR] src/c.js:5 - Typo in variable',
+        '**Problem:** Variable name typo',
+      ].join('\n');
+
+      const findings = ConversationalFeedback.parseFindings(rawReview);
+
+      expect(findings).toHaveLength(3);
+      expect(findings[0].severity).toBe('critical');
+      expect(findings[0].impact).not.toContain('Chunk 2');
+      expect(findings[0].impact).not.toContain('---');
+      expect(findings[0].fix).not.toContain('Chunk');
+      expect(findings[1].severity).toBe('major');
+      expect(findings[1].impact).not.toContain('Chunk 3');
+      expect(findings[1].impact).not.toContain('---');
+      expect(findings[2].severity).toBe('minor');
+    });
+
+    it('properly terminates findings at chunk boundaries with active sections', () => {
+      const rawReview = [
+        '## [CRITICAL] file.ts:10 - Security Issue',
+        '**Problem:** XSS vulnerability',
+        '**Impact:** Attackers can inject scripts',
+        '**Prompt for AI Agents:**',
+        '```',
+        'Fix the XSS issue by sanitizing input.',
+        '```',
+        '',
+        '### Chunk 2/5',
+        '',
+        '## [MAJOR] other.ts:30 - Config Error',
+        '**Problem:** Wrong config key',
+      ].join('\n');
+
+      const findings = ConversationalFeedback.parseFindings(rawReview);
+
+      expect(findings).toHaveLength(2);
+      // The prompt section of the first finding should NOT contain chunk header
+      expect(findings[0].prompt).not.toContain('Chunk 2');
+      expect(findings[0].prompt).toContain('Fix the XSS issue');
+      expect(findings[1].severity).toBe('major');
+      expect(findings[1].problem).toBe('Wrong config key');
+    });
+
+    it('handles 20-chunk combined output without section corruption', () => {
+      // Simulate what happens in production: 20 chunks each with findings
+      const chunkReviews = [];
+      for (let i = 1; i <= 20; i++) {
+        const severity = i <= 5 ? 'CRITICAL' : (i <= 12 ? 'MAJOR' : 'MINOR');
+        chunkReviews.push(
+          `### Chunk ${i}/20`,
+          '',
+          `## [${severity}] file${i}.ts:${i * 10} - Issue ${i}`,
+          `**Problem:** Problem in file ${i}`,
+          `**Impact:** Impact of issue ${i}`,
+          '',
+          '---',
+          '',
+        );
+      }
+      const rawReview = chunkReviews.join('\n');
+
+      const findings = ConversationalFeedback.parseFindings(rawReview);
+
+      expect(findings).toHaveLength(20);
+      // Verify no finding has chunk headers or separators in its content
+      for (const finding of findings) {
+        expect(finding.problem).not.toMatch(/Chunk \d+\/\d+/);
+        expect(finding.impact).not.toMatch(/Chunk \d+\/\d+/);
+        expect(finding.problem).not.toContain('---');
+        expect(finding.impact).not.toContain('---');
+      }
+      // Verify severity counts
+      const critical = findings.filter(f => f.severity === 'critical');
+      const major = findings.filter(f => f.severity === 'major');
+      const minor = findings.filter(f => f.severity === 'minor');
+      expect(critical).toHaveLength(5);
+      expect(major).toHaveLength(7);
+      expect(minor).toHaveLength(8);
+    });
   });
 
   describe('groupBySeverity', () => {
@@ -275,6 +380,44 @@ describe('ConversationalFeedback', () => {
       expect(formatted).toContain('> [!NOTE]');
       expect(formatted).toContain('> [!CAUTION]');
       expect(formatted).toContain('🔴 Critical/BLOCKER findings (2)');
+    });
+
+    it('correctly groups findings from multi-chunk combined input', () => {
+      const rawReview = [
+        '### Chunk 1/3',
+        '',
+        '## [CRITICAL] src/a.ts:10 - XSS Risk',
+        '**Problem:** Unsanitized HTML',
+        '**Impact:** Script injection',
+        '',
+        '---',
+        '',
+        '### Chunk 2/3',
+        '',
+        '## [CRITICAL] src/b.ts:20 - CSS Injection',
+        '**Problem:** Style values not validated',
+        '**Impact:** UI manipulation',
+        '',
+        '## [MAJOR] src/b.ts:50 - Missing Tests',
+        '**Problem:** No test coverage',
+        '',
+        '---',
+        '',
+        '### Chunk 3/3',
+        '',
+        '## [MINOR] src/c.ts:5 - Typo',
+        '**Problem:** Variable name typo',
+      ].join('\n');
+
+      const formatted = ConversationalFeedback.formatReview(rawReview, { actionableCount: 4 });
+
+      // Verify correct counts in section headers
+      expect(formatted).toContain('🔴 Critical/BLOCKER findings (2)');
+      expect(formatted).toContain('🟠 Major comments (1)');
+      expect(formatted).toContain('🟡 Minor comments (1)');
+      // Verify no chunk headers leaked into the output
+      expect(formatted).not.toContain('### Chunk');
+      expect(formatted).not.toMatch(/Chunk \d+\/\d+/);
     });
   });
 });

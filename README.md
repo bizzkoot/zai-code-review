@@ -2,14 +2,25 @@
 
 AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comments, bug detection, improvement suggestions, security checks, and feedback learning via GitHub Actions.
 
-**Latest version: v0.0.5**
+**Latest version: v0.0.6**
 
-## ✨ What's New in v0.0.5
+## ✨ What's New in v0.0.6
+
+- 🧩 **Fixed chunk combination grouping** - 20-chunk reviews now correctly group all findings into Critical, Major, Minor, Info sections without content leaking between chunks
+- 📍 **Accurate security line numbers** - SecurityCheck now parses diff hunk headers (`@@`) for correct file line numbers
+- 📦 **Oversized file handling** - Files exceeding 50KB are flagged and isolated into their own chunk with warnings
+- 📄 **Pagination for resolved comments** - Now handles PRs with 100+ resolved review comments
+- 🔒 **Input validation** - Thread similarity threshold validated to 0-1 range; head SHA checked early
+- 🛡️ **Failure recovery** - All chunks failing now aborts gracefully instead of posting empty review
+
+<details>
+<summary>Previous: v0.0.5</summary>
 
 - 📊 **Fixed multi-chunk severity grouping** - Chunked reviews now stay in Critical, Major, Minor, and Info instead of collapsing into Info after the first chunk
 - 💬 **Fixed inline comment threading** - Separate findings no longer pile into the first matching inline thread
 - 🧵 **Safer thread reuse** - Replies are now reserved for actual follow-up on the same finding within an existing thread
-- 🧾 **Updated release notes** - Added a reference doc for the corrected v0.0.4 reply behavior
+
+</details>
 
 ## 🎯 Features
 
@@ -61,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.5
+        uses: bizzkoot/zai-code-review@v0.0.6
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}
@@ -135,6 +146,8 @@ Built-in static security checks on all diffs:
 | Hardcoded passwords | Critical | Detects weak or hardcoded passwords |
 | Dangerous functions | Major | Detects exec(), new Function(), child_process require |
 | Disabled lint/security | Minor | Flags eslint-disable, tslint:disable |
+
+Security findings now report **accurate file line numbers** using diff hunk headers.
 
 ## 🧠 Feedback Learning
 

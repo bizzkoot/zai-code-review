@@ -17,6 +17,16 @@ class ConversationalFeedback {
     let currentSection = null;
 
     for (const line of lines) {
+      // Skip chunk boundary markers (structural separators between combined chunks)
+      if (line.match(/^#{2,}\s+Chunk\s+\d+\/\d+/) || line === '---' || line === '• --') {
+        if (current) {
+          findings.push(current);
+          current = null;
+          currentSection = null;
+        }
+        continue;
+      }
+
       // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
       const severityMatch = line.match(/^(?:[•*-]\s*)?#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
       if (severityMatch) {
@@ -44,21 +54,29 @@ class ConversationalFeedback {
 
       if (!current) continue;
 
-      // Match section headers within a finding
-      if (line.match(/^\*{2}Problem:\*{2}/i)) {
+      // Match section headers within a finding and capture inline content
+      const problemMatch = line.match(/^\*{2}Problem:\*{2}\s*(.*)/i);
+      if (problemMatch) {
         currentSection = 'problem';
+        if (problemMatch[1]) current.problem = problemMatch[1];
         continue;
       }
-      if (line.match(/^\*{2}Impact:\*{2}/i)) {
+      const impactMatch = line.match(/^\*{2}Impact:\*{2}\s*(.*)/i);
+      if (impactMatch) {
         currentSection = 'impact';
+        if (impactMatch[1]) current.impact = impactMatch[1];
         continue;
       }
-      if (line.match(/^\*{2}Suggested fix:\*{2}/i)) {
+      const fixMatch = line.match(/^\*{2}Suggested fix:\*{2}\s*(.*)/i);
+      if (fixMatch) {
         currentSection = 'fix';
+        if (fixMatch[1]) current.fix = fixMatch[1];
         continue;
       }
-      if (line.match(/^\*{2}Prompt for AI Agents:\*{2}/i)) {
+      const promptMatch = line.match(/^\*{2}Prompt for AI Agents:\*{2}\s*(.*)/i);
+      if (promptMatch) {
         currentSection = 'prompt';
+        if (promptMatch[1]) current.prompt = promptMatch[1];
         continue;
       }
 

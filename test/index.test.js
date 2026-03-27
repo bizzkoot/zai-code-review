@@ -297,3 +297,33 @@ describe('formatSecurityFindingsForReview', () => {
     expect(formatted).toContain('🟠 Major comments (1)');
   });
 });
+
+describe('splitIntoChunks edge cases', () => {
+  test('warns about oversized files exceeding MAX_CHUNK_SIZE', () => {
+    const oversizedPatch = 'x'.repeat(60000);
+    const files = [
+      { filename: 'huge.js', patch: oversizedPatch, status: 'modified' },
+    ];
+    const chunks = splitIntoChunks(files);
+    // File should still be included (not dropped), but in its own chunk
+    expect(chunks.length).toBe(1);
+    expect(chunks[0].length).toBe(1);
+    expect(chunks[0][0].filename).toBe('huge.js');
+    // Verify the oversized flag is set
+    expect(chunks[0][0].oversized).toBe(true);
+  });
+
+  test('splits oversized file from normal files into separate chunks', () => {
+    const files = [
+      { filename: 'small.js', patch: 'small', status: 'modified' },
+      { filename: 'huge.js', patch: 'x'.repeat(60000), status: 'modified' },
+      { filename: 'small2.js', patch: 'small2', status: 'modified' },
+    ];
+    const chunks = splitIntoChunks(files);
+    // Small files should be together, huge file alone
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    const hugeChunk = chunks.find(c => c.some(f => f.filename === 'huge.js'));
+    expect(hugeChunk).toBeDefined();
+    expect(hugeChunk.find(f => f.filename === 'huge.js').oversized).toBe(true);
+  });
+});

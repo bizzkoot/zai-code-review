@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.6] - 2026-03-27
+
+### Fixed
+- Chunk combination now properly groups findings by severity across all chunks
+  - Removed structural chunk headers (`### Chunk X/Y`) from combined review text
+  - Added boundary detection in `parseFindings()` to terminate findings at chunk separators
+  - Chunk headers and `---` separators no longer leak into finding content fields
+- Section header parsing now captures inline content on the same line
+  - `**Problem:**`, `**Impact:**`, `**Suggested fix:**`, and `**Prompt for AI Agents:**` now retain content after the colon on the same line
+- SecurityCheck now reports correct line numbers using diff hunk headers (`@@`)
+  - Previously counted diff headers and context lines, causing wrong line numbers
+- Oversized files (>50KB patch) are now flagged with `oversized` marker and isolated into their own chunk
+  - Warnings logged for oversized files to alert users of potentially incomplete reviews
+- Pagination added to `filterResolvedSuggestions` to handle PRs with 100+ resolved comments
+- Thread similarity threshold now validated to 0-1 range with fallback to default 0.6
+- Head SHA validated early with warning if missing
+- All review chunks failing now aborts with `core.setFailed` instead of posting empty review
+- Low severity security findings now map to `MINOR` instead of `INFO`
+  - Prevents empty sections when AI outputs content on the header line
+
 ## [0.0.5] - 2026-03-21
 
 ### Fixed

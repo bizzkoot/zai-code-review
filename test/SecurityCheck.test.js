@@ -57,4 +57,55 @@ describe('SecurityCheck', () => {
     const findings = SecurityCheck.checkSecurity(files);
     expect(findings.length).toBe(0);
   });
+
+  it('reports correct line numbers using diff hunk headers', () => {
+    const files = [
+      {
+        filename: 'app.js',
+        patch: [
+          '@@ -10,5 +15,8 @@ function test() {',
+          ' context line',
+          ' another context',
+          '+const apiKey = "sk-1234567890abcdef"',
+          ' more context',
+        ].join('\n'),
+      },
+    ];
+    const findings = SecurityCheck.checkSecurity(files);
+    expect(findings.length).toBeGreaterThan(0);
+    // Line should be 17 (start at 15, +2 context lines, +1 for the added line)
+    expect(findings[0].line).toBe(17);
+  });
+
+  it('tracks line numbers correctly across multiple hunks', () => {
+    const files = [
+      {
+        filename: 'multi.js',
+        patch: [
+          '@@ -1,3 +1,4 @@',
+          ' line1',
+          '+const safe = true;',
+          ' line3',
+          '@@ -10,3 +11,4 @@',
+          ' context',
+          '+eval("bad")',
+          ' more',
+        ].join('\n'),
+      },
+    ];
+    const findings = SecurityCheck.checkSecurity(files);
+    expect(findings.length).toBeGreaterThan(0);
+    // eval is in second hunk: starts at new line 11, +1 context, +1 added = line 12
+    expect(findings[0].line).toBe(12);
+  });
+
+  it('handles patches without hunk headers gracefully', () => {
+    const files = [
+      { filename: 'no-hunk.js', patch: '+eval("test")' },
+    ];
+    const findings = SecurityCheck.checkSecurity(files);
+    expect(findings.length).toBeGreaterThan(0);
+    // Falls back to sequential counting
+    expect(findings[0].line).toBe(1);
+  });
 });
