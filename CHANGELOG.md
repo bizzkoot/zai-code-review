@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] - 2026-03-27
+
+### Fixed
+- Combined review parsing now handles real multi-chunk output syntax instead of only idealized bracketed findings
+  - Plain severity banners like `## BLOCKER` and `## Minor` now establish grouping context for following findings
+  - Contextual heading-style findings like `### file:line - title` and bold titles are now parsed under the active severity section
+  - Narrative filler and chunk markers no longer leak into the previous finding body
+- Review prompt contract hardened to reduce malformed chunk output
+  - Forbids conversational introductions, praise, summaries, and sign-offs in chunk responses
+  - Forbids standalone severity banners and chunk or part headings in model output
+  - Instructs the model to omit findings it cannot express in the required structure instead of falling back to free-form commentary
+- Added regression coverage for production-style combined chunk syntax
+  - Tests now cover the noisy response shapes observed in v0.0.6 combined comments
+  - Prevents future regressions where grouping passes synthetic tests but fails on real chunk output
+- GitHub Action runtime migrated from Node 20 to Node 24
+  - Removes the deprecation warning currently emitted by GitHub-hosted runners
+  - Aligns the action metadata with the 2026 JavaScript action runtime transition
+- README quickstart permissions corrected for the APIs used by the action
+  - Documents `issues: write` for the summary PR comment path
+  - Keeps `pull-requests: write` for PR review and inline comment behavior
+
 ## [0.0.6] - 2026-03-27
 
 ### Fixed

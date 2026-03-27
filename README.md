@@ -2,16 +2,25 @@
 
 AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comments, bug detection, improvement suggestions, security checks, and feedback learning via GitHub Actions.
 
-**Latest version: v0.0.6**
+**Latest version: v0.0.7**
 
-## ✨ What's New in v0.0.6
+## ✨ What's New in v0.0.7
 
-- 🧩 **Fixed chunk combination grouping** - 20-chunk reviews now correctly group all findings into Critical, Major, Minor, Info sections without content leaking between chunks
+- 🧩 **Fixed real-world combined chunk parsing** - Final review grouping now handles plain severity banners, contextual heading-style findings, and bold finding titles from multi-chunk output
+- 🧹 **Stops narrative leakage between findings** - Chunk markers and review filler text no longer bleed into the previous finding body
+- 🛡️ **Hardened review prompt contract** - The reviewer is now explicitly told to avoid conversational intros, standalone severity banners, and chunk/part headings in chunk responses
+- ✅ **Added production-shape regression coverage** - Tests now cover the noisy combined syntax seen in v0.0.6 outputs, not just idealized bracketed findings
+
+<details>
+<summary>Previous: v0.0.6</summary>
+
 - 📍 **Accurate security line numbers** - SecurityCheck now parses diff hunk headers (`@@`) for correct file line numbers
 - 📦 **Oversized file handling** - Files exceeding 50KB are flagged and isolated into their own chunk with warnings
 - 📄 **Pagination for resolved comments** - Now handles PRs with 100+ resolved review comments
 - 🔒 **Input validation** - Thread similarity threshold validated to 0-1 range; head SHA checked early
 - 🛡️ **Failure recovery** - All chunks failing now aborts gracefully instead of posting empty review
+
+</details>
 
 <details>
 <summary>Previous: v0.0.5</summary>
@@ -63,8 +72,9 @@ on:
     types: [opened, synchronize]
 
 permissions:
+  issues: write
   pull-requests: write
-  reviews: write
+  # Add `contents: write` only if you enable ZAI_COMMIT_FEEDBACK.
 
 jobs:
   review:
@@ -72,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.6
+        uses: bizzkoot/zai-code-review@v0.0.7
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}
@@ -193,7 +203,7 @@ For small to medium PRs, all changes are sent in a single API request. Larger PR
 | `ZAI_MODEL` | `glm-4.7` | AI model to use |
 | `ZAI_REVIEWER_NAME` | `Security Bot` | Name in comment header |
 | `ZAI_THREAD_SIMILARITY_THRESHOLD` | `0.7` | Thread matching strictness (higher = stricter) |
-| `ZAI_COMMIT_FEEDBACK` | `true` | Enable feedback learning commits |
+| `ZAI_COMMIT_FEEDBACK` | `true` | Enable feedback learning commits (requires `contents: write`) |
 | `ZAI_SYSTEM_PROMPT` | `You are an expert...` | Custom system prompt |
 
 **Benefits:** Customize without editing workflow, change settings without committing, same workflow across environments.
@@ -218,6 +228,7 @@ For multi-repository setups, configure at the organization level to apply settin
 
 - **Default:** `false` (disabled)
 - **Enable:** Set `ZAI_COMMIT_FEEDBACK: 'true'`
+- **Permissions:** Add `contents: write` to the workflow `permissions:` block when enabled
 - Stores feedback in `.zai-feedback.json` to adapt future suggestions
 
 #### System Prompt

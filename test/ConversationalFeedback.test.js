@@ -52,6 +52,19 @@ describe('ConversationalFeedback', () => {
       expect(prompt).toContain('**Impact:**');
       expect(prompt).toContain('Group findings by severity');
     });
+
+    it('forbids conversational filler and standalone severity banners', () => {
+      const files = [
+        { filename: 'foo.js', patch: 'diff', status: 'modified' }
+      ];
+
+      const prompt = ConversationalFeedback.buildPrompt(files, 0, 1);
+
+      expect(prompt).toContain('Do not include conversational introductions, praise, summaries, or sign-offs.');
+      expect(prompt).toContain('Do not emit standalone severity banners such as "## CRITICAL" or "## Major".');
+      expect(prompt).toContain('Do not mention chunk numbers, part numbers, or headings such as "Code Review: Part X/Y".');
+      expect(prompt).toContain('If a finding cannot follow the required structure, omit it rather than writing free-form commentary.');
+    });
   });
 
   describe('postProcess', () => {
@@ -234,6 +247,40 @@ describe('ConversationalFeedback', () => {
       expect(major).toHaveLength(7);
       expect(minor).toHaveLength(8);
     });
+
+    it('parses production-style combined syntax with plain severity banners', () => {
+      const rawReview = [
+        'Here is the review of the provided code.',
+        '',
+        '## BLOCKER',
+        '',
+        '### src/a2ui/renderer.ts:~1035 - Markdown XSS via javascript: Links',
+        'Arbitrary JavaScript execution (XSS). This can lead to data exfiltration.',
+        '**Suggested fix:**',
+        'Use sanitizeUrl for href attributes.',
+        '',
+        '### Chunk 9/20',
+        '',
+        'Thanks for the opportunity to review this section of the codebase.',
+        '',
+        '## Minor',
+        '',
+        '### src/a2ui/webview.ts:268 - Redundant event listener causes double execution',
+        'Remove the change event listener block to prevent duplicate reactivity calculations.',
+      ].join('\n');
+
+      const findings = ConversationalFeedback.parseFindings(rawReview);
+
+      expect(findings).toHaveLength(2);
+      expect(findings[0].severity).toBe('critical');
+      expect(findings[0].title).toBe('Markdown XSS via javascript: Links');
+      expect(findings[0].location).toBe('src/a2ui/renderer.ts:~1035');
+      expect(findings[0].problem).toContain('Arbitrary JavaScript execution');
+      expect(findings[0].problem).not.toContain('Thanks for the opportunity');
+      expect(findings[1].severity).toBe('minor');
+      expect(findings[1].title).toBe('Redundant event listener causes double execution');
+      expect(findings[1].location).toBe('src/a2ui/webview.ts:268');
+    });
   });
 
   describe('groupBySeverity', () => {
@@ -382,6 +429,20 @@ describe('ConversationalFeedback', () => {
       expect(formatted).toContain('🔴 Critical/BLOCKER findings (2)');
     });
 
+    it('does not duplicate outside-diff-only findings in severity sections', () => {
+      const rawReview = `## [CRITICAL] (outside diff) Security issue
+**Problem:** This is outside`;
+      const separated = ConversationalFeedback.separateOutsideDiffComments(rawReview);
+
+      const formatted = ConversationalFeedback.formatReview(rawReview, {
+        hasCriticalOutsideDiff: true,
+        outsideDiffComments: separated.outsideDiffComments,
+      });
+
+      expect(formatted).toContain('⚠️ Outside diff range comments (1)');
+      expect(formatted).not.toContain('🔴 Critical/BLOCKER findings (1)');
+    });
+
     it('correctly groups findings from multi-chunk combined input', () => {
       const rawReview = [
         '### Chunk 1/3',
@@ -418,6 +479,58 @@ describe('ConversationalFeedback', () => {
       // Verify no chunk headers leaked into the output
       expect(formatted).not.toContain('### Chunk');
       expect(formatted).not.toMatch(/Chunk \d+\/\d+/);
+    });
+
+    it('groups production-style combined syntax without leaking narrative filler', () => {
+      const rawReview = [
+        'Here is the review of the provided code.',
+        '',
+        '## BLOCKER',
+        '',
+        '### src/a2ui/renderer.ts:~1035 - Markdown XSS via javascript: Links',
+        'Arbitrary JavaScript execution (XSS). This can lead to data exfiltration.',
+        '**Suggested fix:**',
+        'Use sanitizeUrl for href attributes.',
+        '',
+        '### Chunk 9/20',
+        '',
+        'Thanks for the opportunity to review this section of the codebase.',
+        '',
+        '## MINOR',
+        '',
+        '### src/a2ui/webview.ts:268 - Redundant event listener causes double execution',
+        'Remove the change event listener block to prevent duplicate reactivity calculations.',
+      ].join('\n');
+
+      const formatted = ConversationalFeedback.formatReview(rawReview, { actionableCount: 2 });
+
+      expect(formatted).toContain('🔴 Critical/BLOCKER findings (1)');
+      expect(formatted).toContain('🟡 Minor comments (1)');
+      expect(formatted).toContain('**Markdown XSS via javascript: Links**');
+      expect(formatted).toContain('**Redundant event listener causes double execution**');
+      expect(formatted).not.toContain('Here is the review of the provided code.');
+      expect(formatted).not.toContain('Thanks for the opportunity to review this section of the codebase.');
+      expect(formatted).not.toMatch(/Chunk \d+\/\d+/);
+    });
+
+    it('groups outside-diff comments by file from plain file headings', () => {
+      const rawReview = [
+        '## [CRITICAL] (outside diff) src/a.js:10 - Security issue',
+        '**Problem:** First outside-diff issue',
+        '',
+        '## [MINOR] (outside diff) src/b.js:20 - Typo',
+        '**Problem:** Second outside-diff issue',
+      ].join('\n');
+      const separated = ConversationalFeedback.separateOutsideDiffComments(rawReview);
+
+      const formatted = ConversationalFeedback.formatReview(rawReview, {
+        hasCriticalOutsideDiff: true,
+        outsideDiffComments: separated.outsideDiffComments,
+      });
+
+      expect(formatted).toContain('<summary>src/a.js (1)</summary>');
+      expect(formatted).toContain('<summary>src/b.js (1)</summary>');
+      expect(formatted).not.toContain('<summary>General (2)</summary>');
     });
   });
 });

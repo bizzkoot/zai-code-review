@@ -15,65 +15,92 @@ class ConversationalFeedback {
     const lines = rawReview.split('\n');
     let current = null;
     let currentSection = null;
+    let activeSeverity = null;
+
+    const flushCurrent = () => {
+      if (!current || (!current.title && !current.location)) {
+        current = null;
+        currentSection = null;
+        return;
+      }
+
+      findings.push({
+        ...current,
+        problem: current.problem.trim(),
+        impact: current.impact.trim(),
+        fix: current.fix.trim(),
+        prompt: current.prompt.trim()
+      });
+      current = null;
+      currentSection = null;
+    };
 
     for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        continue;
+      }
+
       // Skip chunk boundary markers (structural separators between combined chunks)
-      if (line.match(/^#{2,}\s+Chunk\s+\d+\/\d+/) || line === '---' || line === '• --') {
-        if (current) {
-          findings.push(current);
-          current = null;
-          currentSection = null;
-        }
+      if (trimmed.match(/^#{2,}\s+Chunk\s+\d+\/\d+/) || trimmed === '---' || trimmed === '• --') {
+        flushCurrent();
+        activeSeverity = null;
         continue;
       }
 
       // Match severity patterns: [SEVERITY] File:Line - Title or (outside diff) prefix
-      const severityMatch = line.match(/^(?:[•*-]\s*)?#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
-      if (severityMatch) {
-        if (current) {
-          findings.push(current);
-        }
-        const severity = severityMatch[1].toUpperCase();
-        const location = severityMatch[2];
-        const title = severityMatch[3] || location;
-        const isOutsideDiff = location.includes('(outside diff)');
+      const bracketedFinding = parseBracketedFindingHeading(trimmed);
+      if (bracketedFinding) {
+        flushCurrent();
+        activeSeverity = bracketedFinding.severity;
+        current = bracketedFinding;
+        continue;
+      }
 
-        current = {
-          severity: normalizeSeverity(severity),
-          location,
-          title: title.replace(/\s*\(outside diff\)\s*/gi, '').trim(),
-          isOutsideDiff,
-          problem: '',
-          impact: '',
-          fix: '',
-          prompt: ''
-        };
-        currentSection = null;
+      const severityBanner = parseSeverityBanner(trimmed);
+      if (severityBanner) {
+        flushCurrent();
+        activeSeverity = severityBanner;
+        continue;
+      }
+
+      if (isNarrativeFiller(trimmed)) {
+        flushCurrent();
+        continue;
+      }
+
+      const contextualFinding = activeSeverity
+        ? parseContextualFindingHeading(trimmed, activeSeverity)
+        : null;
+      if (contextualFinding) {
+        flushCurrent();
+        current = contextualFinding;
         continue;
       }
 
       if (!current) continue;
 
       // Match section headers within a finding and capture inline content
-      const problemMatch = line.match(/^\*{2}Problem:\*{2}\s*(.*)/i);
+      const problemMatch = trimmed.match(/^\*{2}Problem:\*{2}\s*(.*)/i);
       if (problemMatch) {
         currentSection = 'problem';
         if (problemMatch[1]) current.problem = problemMatch[1];
         continue;
       }
-      const impactMatch = line.match(/^\*{2}Impact:\*{2}\s*(.*)/i);
+      const impactMatch = trimmed.match(/^\*{2}Impact:\*{2}\s*(.*)/i);
       if (impactMatch) {
         currentSection = 'impact';
         if (impactMatch[1]) current.impact = impactMatch[1];
         continue;
       }
-      const fixMatch = line.match(/^\*{2}Suggested fix:\*{2}\s*(.*)/i);
+      const fixMatch = trimmed.match(/^\*{2}Suggested fix:\*{2}\s*(.*)/i);
       if (fixMatch) {
         currentSection = 'fix';
         if (fixMatch[1]) current.fix = fixMatch[1];
         continue;
       }
-      const promptMatch = line.match(/^\*{2}Prompt for AI Agents:\*{2}\s*(.*)/i);
+      const promptMatch = trimmed.match(/^\*{2}Prompt for AI Agents:\*{2}\s*(.*)/i);
       if (promptMatch) {
         currentSection = 'prompt';
         if (promptMatch[1]) current.prompt = promptMatch[1];
@@ -87,20 +114,16 @@ class ConversationalFeedback {
         } else {
           current[currentSection] = line;
         }
+      } else if (current.problem) {
+        current.problem += '\n' + line;
+      } else {
+        current.problem = line;
       }
     }
 
-    if (current) {
-      findings.push(current);
-    }
+    flushCurrent();
 
-    return findings.map(f => ({
-      ...f,
-      problem: f.problem.trim(),
-      impact: f.impact.trim(),
-      fix: f.fix.trim(),
-      prompt: f.prompt.trim()
-    }));
+    return findings;
   }
 
   /**
@@ -212,6 +235,10 @@ Specific instructions for AI verification and fix.
 
 Group findings by severity: BLOCKER > CRITICAL > Major > Minor > Info.
 Mark findings outside the diff with "(outside diff)" before the title.
+Do not include conversational introductions, praise, summaries, or sign-offs.
+Do not emit standalone severity banners such as "## CRITICAL" or "## Major".
+Do not mention chunk numbers, part numbers, or headings such as "Code Review: Part X/Y".
+If a finding cannot follow the required structure, omit it rather than writing free-form commentary.
 `.trim();
 
     prompt += '\n\n' + formatInstructions;
@@ -308,8 +335,9 @@ Mark findings outside the diff with "(outside diff)" before the title.
     const byFile = {};
     for (const comment of outsideDiffComments) {
       const content = comment.content.join('\n');
+      const parsedFinding = ConversationalFeedback.parseFindings(content)[0];
       const fileMatch = content.match(/`([^`]+)`/);
-      let file = fileMatch ? fileMatch[1] : 'General';
+      let file = parsedFinding?.location || (fileMatch ? fileMatch[1] : 'General');
       // Extract just the filename without line number (e.g., "src/foo.js:5" -> "src/foo.js")
       file = file.split(':')[0];
       if (!byFile[file]) byFile[file] = [];
@@ -355,7 +383,8 @@ Mark findings outside the diff with "(outside diff)" before the title.
     }
 
     // Parse and group findings by severity
-    const findings = ConversationalFeedback.parseFindings(rawReview);
+    const findings = ConversationalFeedback.parseFindings(rawReview)
+      .filter(finding => outsideDiffComments.length === 0 || !finding.isOutsideDiff);
     const grouped = ConversationalFeedback.groupBySeverity(findings);
 
     // Add critical section
@@ -394,6 +423,70 @@ Mark findings outside the diff with "(outside diff)" before the title.
 
     return output.trim();
   }
+}
+
+function createFinding(severity, location, title) {
+  const cleanLocation = location.replace(/\s*\(outside diff\)\s*/gi, '').trim();
+  const cleanTitle = title.replace(/\s*\(outside diff\)\s*/gi, '').trim();
+
+  return {
+    severity,
+    location: cleanLocation,
+    title: cleanTitle || cleanLocation,
+    isOutsideDiff: location.includes('(outside diff)') || title.includes('(outside diff)'),
+    problem: '',
+    impact: '',
+    fix: '',
+    prompt: ''
+  };
+}
+
+function parseBracketedFindingHeading(line) {
+  const severityMatch = line.match(/^(?:[•*-]\s*)?#+\s*\[(BLOCKER|CRITICAL|Major|Minor|Info)\]\s+(.+?)(?:\s+-\s+(.+))?$/i);
+  if (!severityMatch) {
+    return null;
+  }
+
+  const severity = normalizeSeverity(severityMatch[1]);
+  const location = severityMatch[2];
+  const title = severityMatch[3] || location;
+  return createFinding(severity, location, title);
+}
+
+function parseSeverityBanner(line) {
+  const match = line.match(/^#{1,6}\s+(BLOCKER|CRITICAL|MAJOR|MINOR|INFO)\s*$/i);
+  return match ? normalizeSeverity(match[1]) : null;
+}
+
+function parseContextualFindingHeading(line, severity) {
+  const boldTitleMatch = line.match(/^\*{2}(?!Problem:|Impact:|Suggested fix:|Prompt for AI Agents:)(.+?)\*{2}$/i);
+  if (boldTitleMatch) {
+    return createFinding(severity, '', boldTitleMatch[1]);
+  }
+
+  const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+  if (!headingMatch) {
+    return null;
+  }
+
+  let content = headingMatch[1].trim();
+  if (!content || /^Chunk\s+\d+\/\d+$/i.test(content) || content.startsWith('[')) {
+    return null;
+  }
+
+  content = content.replace(/^(BLOCKER|CRITICAL|MAJOR|MINOR|INFO):\s+/i, '');
+  const dividerIndex = content.indexOf(' - ');
+  if (dividerIndex === -1) {
+    return createFinding(severity, '', content);
+  }
+
+  const location = content.slice(0, dividerIndex).trim();
+  const title = content.slice(dividerIndex + 3).trim();
+  return createFinding(severity, location, title);
+}
+
+function isNarrativeFiller(line) {
+  return /^(?:Here is the review|Here is my review|Here are my findings|Thanks for the opportunity|Overall,|Great work on this PR|Keep up the good work|Next steps:?)/i.test(line);
 }
 
 // Normalizes severity labels to a standard format
