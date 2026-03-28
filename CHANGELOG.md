@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8] - 2026-03-28
+
+### Fixed
+- Final PR comments now disclose partial review coverage when one or more chunks fail
+  - Adds a visible caution banner so reviewers can see incomplete chunk coverage without opening the action log
+  - Prevents partially merged reviews from appearing complete when failed chunks were omitted
+- Chunk merge summary logging now distinguishes successful chunks from failed chunks
+  - Replaces the previous total-only merge summary with explicit success and failure counts
+- Retry diagnostics now include richer chunk context for timeout and socket reset failures
+  - Logs chunk position, file count, oversized-file count, patch size, prompt size, and elapsed time per failed attempt
+- Added regression coverage for partial chunk failures in the final merged review body
+  - Tests the caution banner path and the new formatting helpers used by the main run loop
+
 ## [0.0.7] - 2026-03-27
 
 ### Fixed

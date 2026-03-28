@@ -1,7 +1,11 @@
 const {
   splitIntoChunks,
   buildChunkPrompt,
+  buildCombinedReview,
+  buildChunkFailureWarning,
   extractActionableSuggestions,
+  formatApiRequestLabel,
+  formatChunkMergeSummary,
   formatSecurityFindingsForReview,
   hashString,
   RETRY_CONFIG,
@@ -295,6 +299,120 @@ describe('formatSecurityFindingsForReview', () => {
     const formatted = ConversationalFeedback.formatReview(securityReview);
     expect(formatted).toContain('🔴 Critical/BLOCKER findings (1)');
     expect(formatted).toContain('🟠 Major comments (1)');
+  });
+});
+
+describe('buildChunkFailureWarning', () => {
+  test('returns empty string when no chunks failed', () => {
+    expect(buildChunkFailureWarning([], 3)).toBe('');
+  });
+
+  test('builds a visible warning banner for partial chunk failures', () => {
+    const warning = buildChunkFailureWarning([
+      { index: 1, error: 'Z.ai API: Request timed out.' },
+      { index: 3, error: 'read ECONNRESET' },
+    ], 5);
+
+    expect(warning).toContain('> [!CAUTION]');
+    expect(warning).toContain('Review incomplete');
+    expect(warning).toContain('2 of 5 chunk(s) failed');
+    expect(warning).toContain('Chunks 2, 4');
+  });
+});
+
+describe('buildCombinedReview', () => {
+  test('surfaces partial chunk failures in the final review body', () => {
+    const combinedReview = buildCombinedReview([
+      {
+        index: 0,
+        rawReview: '## [CRITICAL] src/a.js:10 - First issue\n**Problem:** Broken behavior',
+        summaryReview: '## [CRITICAL] src/a.js:10 - First issue\n**Problem:** Broken behavior',
+        success: true,
+      },
+      {
+        index: 1,
+        rawReview: '',
+        summaryReview: '',
+        review: '**Error reviewing this chunk:** read ECONNRESET',
+        success: false,
+      },
+    ], 2, 0);
+
+    expect(combinedReview).toContain('Review incomplete');
+    expect(combinedReview).toContain('1 of 2 chunk(s) failed');
+    expect(combinedReview).toContain('**First issue**');
+    expect(combinedReview).toContain('🔴 Critical/BLOCKER findings (1)');
+  });
+
+  test('omits warning banner when all chunks succeed', () => {
+    const combinedReview = buildCombinedReview([
+      {
+        index: 0,
+        rawReview: '## [MINOR] src/a.js:10 - Small issue\n**Problem:** Minor bug',
+        summaryReview: '## [MINOR] src/a.js:10 - Small issue\n**Problem:** Minor bug',
+        success: true,
+      },
+    ], 1, 0);
+
+    expect(combinedReview).not.toContain('Review incomplete');
+    expect(combinedReview).toContain('🟡 Minor comments (1)');
+  });
+
+  test('skips empty successful chunk text when combining reviews', () => {
+    const combinedReview = buildCombinedReview([
+      {
+        index: 0,
+        rawReview: '',
+        summaryReview: '',
+        success: true,
+      },
+      {
+        index: 1,
+        rawReview: '## [MINOR] src/b.js:20 - Follow-up issue\n**Problem:** Still valid',
+        summaryReview: '## [MINOR] src/b.js:20 - Follow-up issue\n**Problem:** Still valid',
+        success: true,
+      },
+    ], 2, 0);
+
+    expect(combinedReview).toContain('**Follow-up issue**');
+    expect(combinedReview).not.toMatch(/\n{4,}/);
+  });
+});
+
+describe('formatChunkMergeSummary', () => {
+  test('reports successful and failed chunk counts explicitly', () => {
+    expect(formatChunkMergeSummary(16, 19)).toBe(
+      'Combined 16 successful review chunk(s) into single comment. 3 chunk(s) failed.'
+    );
+  });
+});
+
+describe('formatApiRequestLabel', () => {
+  test('includes chunk position, file count, patch size, oversized count, and prompt size', () => {
+    const label = formatApiRequestLabel({
+      chunkIndex: 1,
+      totalChunks: 4,
+      fileCount: 3,
+      oversizedFileCount: 1,
+      patchChars: 8192,
+      promptChars: 2048,
+    });
+
+    expect(label).toBe('chunk 2/4, 3 file(s), 1 oversized file(s), 8192 patch chars, 2048 prompt chars');
+  });
+
+  test('omits oversized count when no oversized files are present', () => {
+    const label = formatApiRequestLabel({
+      chunkIndex: 0,
+      totalChunks: 2,
+      fileCount: 5,
+      oversizedFileCount: 0,
+      patchChars: 4096,
+      promptChars: 1024,
+    });
+
+    expect(label).toBe('chunk 1/2, 5 file(s), 4096 patch chars, 1024 prompt chars');
+    expect(label).not.toContain('oversized');
   });
 });
 

@@ -105,6 +105,85 @@ function buildChunkPrompt(files, chunkIndex, totalChunks) {
   return prompt;
 }
 
+function formatApiRequestLabel({ chunkIndex, totalChunks, fileCount, oversizedFileCount, patchChars, promptChars }) {
+  const parts = [
+    `chunk ${chunkIndex + 1}/${totalChunks}`,
+    `${fileCount} file(s)`,
+  ];
+
+  if (oversizedFileCount > 0) {
+    parts.push(`${oversizedFileCount} oversized file(s)`);
+  }
+
+  parts.push(`${patchChars} patch chars`);
+  parts.push(`${promptChars} prompt chars`);
+
+  return parts.join(', ');
+}
+
+function buildChunkFailureWarning(failedChunks, totalChunks) {
+  if (!Array.isArray(failedChunks) || failedChunks.length === 0) {
+    return '';
+  }
+
+  const chunkList = failedChunks.map(chunk => chunk.index + 1).join(', ');
+  return [
+    '> [!CAUTION]',
+    `> Review incomplete: ${failedChunks.length} of ${totalChunks} chunk(s) failed during AI review.`,
+    `> Chunks ${chunkList} failed and were omitted from the merged results. See the workflow logs for details.`,
+  ].join('\n');
+}
+
+function formatChunkMergeSummary(successfulChunks, totalChunks) {
+  const failedChunks = Math.max(totalChunks - successfulChunks, 0);
+  if (failedChunks === 0) {
+    return `Combined ${successfulChunks} successful review chunk(s) into single comment.`;
+  }
+
+  return `Combined ${successfulChunks} successful review chunk(s) into single comment. ${failedChunks} chunk(s) failed.`;
+}
+
+function buildCombinedReview(reviews, totalChunks, actionableCount) {
+  const failedChunks = reviews
+    .filter(review => !review.success)
+    .map(review => ({ index: review.index, error: review.error || review.review || 'Unknown error' }));
+  let allOutsideDiffComments = [];
+  let rawCombinedReview = '';
+
+  if (totalChunks > 1) {
+    for (const review of reviews) {
+      if (!review.success) {
+        continue;
+      }
+
+      const separated = ConversationalFeedback.separateOutsideDiffComments(review.rawReview);
+      allOutsideDiffComments.push(...separated.outsideDiffComments);
+      rawCombinedReview += (review.summaryReview || review.rawReview || '') + '\n\n';
+    }
+  } else if (reviews[0]?.success) {
+    const separated = ConversationalFeedback.separateOutsideDiffComments(reviews[0].rawReview);
+    allOutsideDiffComments.push(...separated.outsideDiffComments);
+    rawCombinedReview = reviews[0].summaryReview || reviews[0].rawReview || '';
+  } else {
+    rawCombinedReview = reviews[0]?.review || '';
+  }
+
+  const hasCriticalOutsideDiff = allOutsideDiffComments.some(comment => {
+    const content = comment.content?.join('\n') || '';
+    return /\b(critical|blocker)\b/i.test(content);
+  });
+  const formattedReview = ConversationalFeedback.formatReview(rawCombinedReview, {
+    actionableCount,
+    hasCriticalOutsideDiff,
+    outsideDiffComments: allOutsideDiffComments,
+  });
+  const failureWarning = buildChunkFailureWarning(failedChunks, totalChunks);
+
+  return failureWarning
+    ? `${failureWarning}\n\n${formattedReview}`.trim()
+    : formattedReview;
+}
+
 function extractActionableSuggestions(reviews) {
   const suggestions = [];
   const seen = new Set();
@@ -253,22 +332,26 @@ function callZaiApi(apiKey, model, systemPrompt, prompt) {
   });
 }
 
-async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt) {
+async function callZaiApiWithRetry(apiKey, model, systemPrompt, prompt, requestLabel = 'request') {
   let lastError;
 
   for (let attempt = 0; attempt < RETRY_CONFIG.maxRetries; attempt++) {
+    const attemptStartedAt = Date.now();
     try {
       return await callZaiApi(apiKey, model, systemPrompt, prompt);
     } catch (err) {
       lastError = err;
-      core.info(`API call failed (attempt ${attempt + 1}/${RETRY_CONFIG.maxRetries}): ${err.message}`);
+      const elapsedMs = Date.now() - attemptStartedAt;
+      core.info(
+        `API call failed for ${requestLabel} (attempt ${attempt + 1}/${RETRY_CONFIG.maxRetries}) after ${elapsedMs}ms: ${err.message}`
+      );
 
       if (attempt < RETRY_CONFIG.maxRetries - 1) {
         const delayMs = Math.min(
           RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt),
           RETRY_CONFIG.maxDelayMs
         );
-        core.info(`Retrying in ${delayMs}ms...`);
+        core.info(`Retrying ${requestLabel} in ${delayMs}ms...`);
         await new Promise(r => setTimeout(r, delayMs));
       }
     }
@@ -456,7 +539,15 @@ async function run() {
       }
       core.info(`Processing chunk ${i + 1}/${chunks.length} (${chunks[i].length} file(s))...`);
       const prompt = ConversationalFeedback.buildPrompt(chunks[i], i, chunks.length);
-      const rawReview = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt);
+      const requestLabel = formatApiRequestLabel({
+        chunkIndex: i,
+        totalChunks: chunks.length,
+        fileCount: chunks[i].length,
+        oversizedFileCount: oversizedFiles.length,
+        patchChars: chunks[i].reduce((total, file) => total + (file.patch?.length || 0), 0),
+        promptChars: prompt.length,
+      });
+      const rawReview = await callZaiApiWithRetry(apiKey, model, systemPrompt, prompt, requestLabel);
       const review = ConversationalFeedback.postProcess(rawReview);
       // Prepend actionable security findings for this chunk
       const chunkFindings = SecurityCheck.checkSecurity(chunks[i]);
@@ -472,7 +563,7 @@ async function run() {
     } catch (err) {
       core.warning(`Chunk ${i + 1}/${chunks.length} failed: ${err.message}`);
       failedChunks.push({ index: i, error: err.message });
-      reviews.push({ index: i, rawReview: '', review: `**Error reviewing this chunk:** ${err.message}`, success: false });
+      reviews.push({ index: i, rawReview: '', review: `**Error reviewing this chunk:** ${err.message}`, error: err.message, success: false });
     }
   }
 
@@ -484,27 +575,9 @@ async function run() {
     }
   }
 
-  // Extract outside-diff comments from each chunk and collect them
-  let allOutsideDiffComments = [];
-  let rawCombinedReview = '';
-
   if (chunks.length > 1) {
-    for (const r of reviews) {
-      if (r.success) {
-        const separated = ConversationalFeedback.separateOutsideDiffComments(r.rawReview);
-        allOutsideDiffComments.push(...separated.outsideDiffComments);
-        rawCombinedReview += r.summaryReview + '\n\n';
-      }
-    }
-    core.info(`Combined ${chunks.length} review chunk(s) into single comment.`);
-  } else {
-    if (reviews[0]?.success) {
-      const separated = ConversationalFeedback.separateOutsideDiffComments(reviews[0].rawReview);
-      allOutsideDiffComments.push(...separated.outsideDiffComments);
-      rawCombinedReview = reviews[0].summaryReview;
-    } else {
-      rawCombinedReview = reviews[0]?.review || '';
-    }
+    const successfulChunks = reviews.filter(review => review.success).length;
+    core.info(formatChunkMergeSummary(successfulChunks, chunks.length));
   }
 
   // Extract actionable suggestions count for formatting
@@ -520,18 +593,7 @@ async function run() {
     );
   }
 
-  // Check if there are critical outside-diff comments
-  const hasCriticalOutsideDiff = allOutsideDiffComments.some(c => {
-    const content = c.content?.join('\n') || '';
-    return /\b(critical|blocker)\b/i.test(content);
-  });
-
-  // Format the review with collapsible sections and severity grouping
-  const combinedReview = ConversationalFeedback.formatReview(rawCombinedReview, {
-    actionableCount: actionableSuggestions.length,
-    hasCriticalOutsideDiff,
-    outsideDiffComments: allOutsideDiffComments,
-  });
+  const combinedReview = buildCombinedReview(reviews, chunks.length, actionableSuggestions.length);
 
   const body = `## ${reviewerName}\n\n${combinedReview}\n\n${COMMENT_MARKER}`;
 
@@ -621,7 +683,11 @@ if (require.main === module) {
 module.exports = {
   splitIntoChunks,
   buildChunkPrompt,
+  buildCombinedReview,
+  buildChunkFailureWarning,
   extractActionableSuggestions,
+  formatApiRequestLabel,
+  formatChunkMergeSummary,
   formatSecurityFindingsForReview,
   filterResolvedSuggestions,
   calculateSimilarity,

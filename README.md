@@ -2,14 +2,24 @@
 
 AI-powered GitHub Pull Request code review using Z.ai models. Automatic PR comments, bug detection, improvement suggestions, security checks, and feedback learning via GitHub Actions.
 
-**Latest version: v0.0.7**
+**Latest version: v0.0.8**
 
-## ✨ What's New in v0.0.7
+## ✨ What's New in v0.0.8
+
+- ⚠️ **Incomplete reviews are now disclosed** - Final PR comments show a visible caution banner when one or more chunks fail, so reviewers can see partial coverage directly in GitHub
+- 📊 **Chunk merge logging is clearer** - Merge summaries now report successful chunk count and failed chunk count explicitly instead of implying all attempted chunks were merged
+- 🧪 **Partial-failure regression coverage added** - Tests now cover the final merged review body when some chunks fail, including the warning banner path
+- 🔎 **Retry diagnostics are richer** - Timeout and `ECONNRESET` retries now log chunk position, file count, oversized-file count, patch size, prompt size, and elapsed time per failed attempt
+
+<details>
+<summary>Previous: v0.0.7</summary>
 
 - 🧩 **Fixed real-world combined chunk parsing** - Final review grouping now handles plain severity banners, contextual heading-style findings, and bold finding titles from multi-chunk output
 - 🧹 **Stops narrative leakage between findings** - Chunk markers and review filler text no longer bleed into the previous finding body
 - 🛡️ **Hardened review prompt contract** - The reviewer is now explicitly told to avoid conversational intros, standalone severity banners, and chunk/part headings in chunk responses
 - ✅ **Added production-shape regression coverage** - Tests now cover the noisy combined syntax seen in v0.0.6 outputs, not just idealized bracketed findings
+
+</details>
 
 <details>
 <summary>Previous: v0.0.6</summary>
@@ -82,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.7
+        uses: bizzkoot/zai-code-review@v0.0.8
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}
