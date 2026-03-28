@@ -1,15 +1,17 @@
 name: AI Code Review with Z.ai
 
 # NOTE: This workflow is for testing this action on itself.
-# For use in other repositories, replace 'bizzkoot/zai-code-review@v0.0.3'
-# with your fork or the published action version.
+# For use in other repositories, replace 'bizzkoot/zai-code-review@v0.0.8'
+# with your fork or the latest published action version.
 
 on:
   pull_request:
     types: [opened, synchronize]
 
 permissions:
+  issues: write
   pull-requests: write
+  # Add `contents: write` only if you enable ZAI_COMMIT_FEEDBACK.
 
 jobs:
   review:
@@ -17,9 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Code Review
-        uses: bizzkoot/zai-code-review@v0.0.3
+        uses: bizzkoot/zai-code-review@v0.0.8
         with:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          ZAI_MODEL: ${{ vars.ZAI_MODEL }}
-          ZAI_SYSTEM_PROMPT: ${{ vars.ZAI_SYSTEM_PROMPT }}
-          ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME }}
+          ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}
+          ZAI_SYSTEM_PROMPT: ${{ vars.ZAI_SYSTEM_PROMPT || '' }}
+          ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME || 'Z.ai Code Review' }}
+          ZAI_THREAD_SIMILARITY_THRESHOLD: ${{ vars.ZAI_THREAD_SIMILARITY_THRESHOLD || '0.6' }}
+          ZAI_COMMIT_FEEDBACK: ${{ vars.ZAI_COMMIT_FEEDBACK || 'false' }}

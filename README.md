@@ -97,6 +97,7 @@ jobs:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL || 'glm-4.7' }}
           ZAI_REVIEWER_NAME: ${{ vars.ZAI_REVIEWER_NAME || 'Z.ai Code Review' }}
+          ZAI_SYSTEM_PROMPT: ${{ vars.ZAI_SYSTEM_PROMPT || '' }}
           ZAI_THREAD_SIMILARITY_THRESHOLD: ${{ vars.ZAI_THREAD_SIMILARITY_THRESHOLD || '0.6' }}
           ZAI_COMMIT_FEEDBACK: ${{ vars.ZAI_COMMIT_FEEDBACK || 'false' }}
 ```
